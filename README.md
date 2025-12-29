@@ -33,7 +33,7 @@ pip install gpe-framework
 Or install from source:
 
 ```bash
-git clone https://github.com/vdehtiarov/gpe-framework.git
+git clone https://github.com/vladdehtiarov/gpe-framework.git
 cd gpe-framework
 pip install -e .
 ```
@@ -219,7 +219,7 @@ If you use GPE in your research, please cite:
 
 ## 🔗 Links
 
-- [GitHub Repository](https://github.com/vdehtiarov/gpe-framework)
+- [GitHub Repository](https://github.com/vladdehtiarov/gpe-framework)
 - [PyPI Package](https://pypi.org/project/gpe-framework/)
-- [Documentation](https://github.com/vdehtiarov/gpe-framework#readme)
-- [Issue Tracker](https://github.com/vdehtiarov/gpe-framework/issues)
+- [Documentation](https://github.com/vladdehtiarov/gpe-framework#readme)
+- [Issue Tracker](https://github.com/vladdehtiarov/gpe-framework/issues)

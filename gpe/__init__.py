@@ -45,7 +45,7 @@ Email: vvdehtiarov@gmail.com
 License: MIT
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __author__ = "Vladyslav Dehtiarov"
 __email__ = "vvdehtiarov@gmail.com"
 __license__ = "MIT"
