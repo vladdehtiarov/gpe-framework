@@ -10,7 +10,7 @@ long_description = readme_path.read_text(encoding="utf-8") if readme_path.exists
 
 setup(
     name="gpe-framework",
-    version="1.0.1",
+    version="1.1.0",
     author="Vladyslav Dehtiarov",
     author_email="vvdehtiarov@gmail.com",
     description="Greedy-Prune-Explain: Minimal local explanations for decision tree predictions",
