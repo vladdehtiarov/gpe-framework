@@ -93,7 +93,7 @@ def load_dataset(name, max_samples=100000):
     print(f"   📂 Loading {name}...")
     
     if name == 'Lending Club':
-        filepath = DOCS_DIR / 'lending_сlub_2007_to_2018Q4.csv'
+        filepath = DOCS_DIR / 'lending_club_2007_to_2018Q4.csv'
         if not filepath.exists(): return None
         
         df = pd.read_csv(filepath, nrows=max_samples, low_memory=False)

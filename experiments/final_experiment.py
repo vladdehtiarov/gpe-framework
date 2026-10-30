@@ -71,7 +71,7 @@ def print_subheader(text):
 
 def load_lending_club(sample_size=500000):
     """Завантажити Lending Club (2.26M записів)."""
-    filepath = DOCS_DIR / 'lending_сlub_2007_to_2018Q4.csv'
+    filepath = DOCS_DIR / 'lending_club_2007_to_2018Q4.csv'
     
     print(f"   📁 Lending Club...")
     
