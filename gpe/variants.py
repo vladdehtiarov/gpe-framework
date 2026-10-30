@@ -253,9 +253,6 @@ class GPEMonotonic(GPEExplainer):
         
         Only keeps conditions that align with monotonic constraints.
         """
-        if X_background is None or len(rule.conditions) <= 1:
-            return rule
-        
         prediction = self.model.predict(x.reshape(1, -1))[0]
         
         # First, filter conditions that violate monotonic constraints
