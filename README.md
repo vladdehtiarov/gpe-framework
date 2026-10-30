@@ -248,8 +248,7 @@ If you use GPE in your research, please cite:
   title={The GPE-Ensemble Algorithm: Extending Local Explainability to Ensemble Decision-Tree Models},
   author={Dehtiarov, Vladyslav and Borovyk, Valentyna},
   journal={Nauka i tekhnika sohodni (Science and Technology Today)},
-  year={2026},
-  note={Accepted for publication}
+  year={2026}
 }
 ```
 
