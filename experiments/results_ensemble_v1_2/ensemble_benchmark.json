@@ -1,0 +1,35 @@
+[
+  {
+    "Database": "Credit Risk",
+    "Model": "RandomForest",
+    "Method": "GPE-Ensemble",
+    "Time (ms)": 28.84061859299739,
+    "Time std": 2.8345211012099423,
+    "Complexity": 1.8,
+    "Precision": 0.9819154503906827,
+    "Coverage": 0.22320000000000004,
+    "N samples": 150
+  },
+  {
+    "Database": "Credit Fraud",
+    "Model": "RandomForest",
+    "Method": "GPE-Ensemble",
+    "Time (ms)": 30.75244413067897,
+    "Time std": 6.140718799737771,
+    "Complexity": 1.0,
+    "Precision": 1.0,
+    "Coverage": 0.9018000000000003,
+    "N samples": 150
+  },
+  {
+    "Database": "Lending Club",
+    "Model": "RandomForest",
+    "Method": "GPE-Ensemble",
+    "Time (ms)": 33.61256778240204,
+    "Time std": 8.958723376535685,
+    "Complexity": 1.0,
+    "Precision": 1.0,
+    "Coverage": 0.8854,
+    "N samples": 150
+  }
+]

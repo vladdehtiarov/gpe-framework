@@ -1,0 +1,4 @@
+Database,Model,Method,Time (ms),Time std,Complexity,Precision,Coverage,N samples
+Credit Risk,RandomForest,GPE-Ensemble,28.84061859299739,2.8345211012099423,1.8,0.9819154503906827,0.22320000000000004,150
+Credit Fraud,RandomForest,GPE-Ensemble,30.75244413067897,6.140718799737771,1.0,1.0,0.9018000000000003,150
+Lending Club,RandomForest,GPE-Ensemble,33.61256778240204,8.958723376535685,1.0,1.0,0.8854,150

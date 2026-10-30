@@ -284,49 +284,78 @@ class GPEMonotonic(GPEExplainer):
 
 class GPEEnsemble:
     """
-    GPE Explainer for Ensemble Tree Models (High-Performance).
-    
+    GPE Explainer for Ensemble Tree Models (Fast Consensus).
+
     Generates explanations for Random Forest, Gradient Boosting, etc.
-    by finding the 'Consensus Rule' among the voting trees.
-    
-    OPTIMIZATION:
-    Uses 'Fast Consensus' algorithm: precomputed paths + threshold aggregation.
-    Avoids expensive per-tree pruning or ensemble-level pruning during explanation.
-    
-    Complexity: O(N_trees + N_conditions), typically < 10ms.
+    as a consensus rule agreed upon by the trees that voted for the
+    ensemble's prediction.
+
+    The algorithm has three phases:
+    1. Path Extraction: decision path of x in every tree and the tree's vote
+    2. Threshold Aggregation: per feature, the bounds of the voting trees are
+       intersected into [low_j, high_j]; a feature enters the candidate pool
+       when it is used by at least M/2 + 1 trees ('majority') or by trees
+       holding more than half of the total weight ('weighted', trees weighted
+       by their individual accuracy on the training data)
+    3. Consensus Pruning: greedily remove the condition whose removal lowers
+       precision the least, while precision stays >= min_precision
+
+    Complexity: O(N_trees + N_conditions) per explanation.
+
+    Parameters:
+        model: A fitted sklearn ensemble (RandomForest*, GradientBoosting*)
+        feature_names: Optional list of feature names
+        X_train: Training data (default background, tree weights)
+        min_precision: Precision threshold tau
+        aggregation: 'majority' or 'weighted'
+        y_train: Optional labels for tree weights; when omitted, the
+                 ensemble's own predictions on X_train are used
+
+    Example:
+        >>> explainer = GPEEnsemble(rf_model, X_train=X_train)
+        >>> explanation = explainer.explain(x)
     """
-    
+
+    AGGREGATIONS = ('majority', 'weighted')
+
     def __init__(
         self,
         model,
         feature_names: Optional[List[str]] = None,
         X_train: Optional[np.ndarray] = None,
         min_precision: float = 0.95,
-        aggregation: str = 'majority'
+        aggregation: str = 'majority',
+        y_train: Optional[np.ndarray] = None
     ):
+        if aggregation not in self.AGGREGATIONS:
+            raise ValueError(
+                f"aggregation must be one of {self.AGGREGATIONS}, got '{aggregation}'"
+            )
+        if not is_ensemble_tree(model):
+            raise ValueError("GPEEnsemble requires an ensemble tree model")
+
         self.model = model
         self.feature_names = feature_names
         self.X_train = X_train
         self.min_precision = min_precision
         self.aggregation = aggregation
-        
-        if not is_ensemble_tree(model):
-            raise ValueError("GPEEnsemble requires an ensemble tree model")
-        
+
         if self.feature_names is None:
             n_features = model.n_features_in_
             self.feature_names = [f"feature_{i}" for i in range(n_features)]
-        
+
         self._trees = self._extract_trees()
         self._tree_paths = self._precompute_paths()
-    
+        self._tree_weights = self._compute_tree_weights(y_train)
+        self._bg_cache = (None, None)
+
     def _extract_trees(self) -> List:
         """Extract individual trees from the ensemble."""
         from sklearn.ensemble import (
             RandomForestClassifier, RandomForestRegressor,
             GradientBoostingClassifier, GradientBoostingRegressor
         )
-        
+
         if isinstance(self.model, (RandomForestClassifier, RandomForestRegressor)):
             return self.model.estimators_
         elif isinstance(self.model, (GradientBoostingClassifier, GradientBoostingRegressor)):
@@ -338,7 +367,7 @@ class GPEEnsemble:
         else:
             try:
                 return self.model.get_booster().get_dump()
-            except:
+            except Exception:
                 raise ValueError(f"Unsupported ensemble model: {type(self.model)}")
 
     def _precompute_paths(self) -> List[Dict[int, List[Condition]]]:
@@ -352,34 +381,71 @@ class GPEEnsemble:
         return tree_paths
 
     def _traverse_tree(self, tree, paths_dict):
-        """Recursively map leaf IDs to conditions."""
+        """Map leaf IDs to the conditions on the path from the root."""
         tree_ = tree.tree_
         feature_names = self.feature_names
-        stack = [(0, [])] # (node_id, conditions)
-        
+        stack = [(0, [])]  # (node_id, conditions)
+
         while stack:
             node_id, current_conds = stack.pop()
-            
+
             # Leaf
             if tree_.children_left[node_id] == tree_.children_right[node_id]:
                 paths_dict[node_id] = current_conds
                 continue
-            
+
             # Internal
             feature_idx = tree_.feature[node_id]
             threshold = tree_.threshold[node_id]
             feat_name = feature_names[feature_idx]
-            
+
             # Right child (>)
             right_child = tree_.children_right[node_id]
             right_cond = Condition(feature_idx, feat_name, '>', threshold)
             stack.append((right_child, current_conds + [right_cond]))
-            
+
             # Left child (<=)
             left_child = tree_.children_left[node_id]
             left_cond = Condition(feature_idx, feat_name, '<=', threshold)
             stack.append((left_child, current_conds + [left_cond]))
-    
+
+    def _votes_by_class(self) -> bool:
+        """Whether individual trees cast class votes (bagging classifiers)."""
+        from sklearn.ensemble import RandomForestClassifier
+        return isinstance(self.model, RandomForestClassifier)
+
+    def _compute_tree_weights(self, y_train: Optional[np.ndarray]) -> np.ndarray:
+        """Vote weights: 1 per tree, or tree accuracy for 'weighted'."""
+        n = len(self._trees)
+        if self.aggregation == 'majority' or not self._votes_by_class():
+            return np.ones(n)
+        if self.X_train is None:
+            raise ValueError("aggregation='weighted' requires X_train")
+
+        X = np.asarray(self.X_train)
+        labels = self.model.predict(X) if y_train is None else np.asarray(y_train)
+        classes = self.model.classes_
+        weights = np.empty(n)
+        for i, tree in enumerate(self._trees):
+            tree_pred = classes[tree.predict(X).astype(int)]
+            weights[i] = (tree_pred == labels).mean()
+        return weights
+
+    def _tree_vote(self, i: int, leaf_id: int, class_idx: int) -> bool:
+        """Whether tree i voted for the ensemble's class at this leaf."""
+        if not self._votes_by_class():
+            return True
+        value = self._trees[i].tree_.value[leaf_id]
+        return int(np.argmax(value[0])) == class_idx
+
+    def _background_predictions(self, X_background: np.ndarray) -> np.ndarray:
+        """Model predictions on the background set, cached between calls."""
+        key, preds = self._bg_cache
+        if key is not X_background:
+            preds = self.model.predict(X_background)
+            self._bg_cache = (X_background, preds)
+        return preds
+
     def explain(
         self,
         x: np.ndarray,
@@ -387,167 +453,115 @@ class GPEEnsemble:
         n_trees: Optional[int] = None
     ) -> Explanation:
         """
-        Generate explanation using Fast Consensus.
+        Generate a consensus explanation for a single instance.
+
+        Args:
+            x: Instance to explain (1D array)
+            X_background: Background data for precision/coverage
+                          (defaults to X_train)
+            n_trees: Use only the first n_trees trees of the ensemble
+
+        Returns:
+            Explanation object
         """
         start_time = time.time()
         x = np.asarray(x).flatten()
-        
+
         if X_background is None:
             X_background = self.X_train
-            
+
         prediction = self.model.predict(x.reshape(1, -1))[0]
-        
-        # 1. Get winning trees (Prediction Consistency)
-        # We only consider trees that voted for the winning class (for Classifiers)
-        # For Regressors, we might take all.
-        try:
-             # Only works for sklearn classifiers
-             if hasattr(self.model, 'estimators_') and hasattr(self.model, 'classes_'):
-                 # Get individual predictions
-                 pass # Too slow to run predict on all trees.
-                 # Actually, we should just use all trees. 
-                 # Majority rule is implicit in the count collection.
-        except:
-             pass
+        class_idx = 0
+        if hasattr(self.model, 'classes_'):
+            class_idx = int(np.flatnonzero(self.model.classes_ == prediction)[0])
 
-        # 2. Get Leaves O(1)
-        leaves = []
-        try:
-            if hasattr(self.model, 'apply'):
-                leaves = self.model.apply(x.reshape(1, -1))[0]
-                if len(leaves.shape) > 1: leaves = leaves.flatten()
-            else:
-                 # Fallback
-                 leaves = [-1] * len(self._trees)
-        except:
-             leaves = [-1] * len(self._trees)
+        # Phase 1: Path Extraction
+        n_use = min(n_trees or len(self._trees), len(self._trees))
+        leaves = np.asarray(self.model.apply(x.reshape(1, -1))).flatten()
+        weights = self._tree_weights[:n_use]
+        total_weight = weights.sum()
 
-        # 3. Collect Conditions
-        trees_to_use = self._trees[:n_trees] if n_trees else self._trees
-        n_use = len(trees_to_use)
-        if len(leaves) < n_use:
-             leaves = list(leaves) + [-1]*(n_use - len(leaves))
-             
-        # Group by (Feature, Operator) -> List of Thresholds
-        grouped_conditions = defaultdict(list)
-        active_trees = 0
-        
-        for i, tree in enumerate(trees_to_use):
-            if i < len(self._tree_paths) and self._tree_paths[i]:
-                leaf_id = leaves[i]
-                if leaf_id in self._tree_paths[i]:
-                    active_trees += 1
-                    path = self._tree_paths[i][leaf_id]
-                    for cond in path:
-                         key = (cond.feature_index, cond.feature_name, cond.operator)
-                         grouped_conditions[key].append(cond.threshold)
+        # Phase 2: Threshold Aggregation over the trees that voted for the class
+        lows: Dict[int, float] = {}
+        highs: Dict[int, float] = {}
+        support: Dict[int, float] = defaultdict(float)
+        voting_trees = 0
 
-        # 4. Forward Selection (Greedy Add)
-        # Instead of taking ALL frequent conditions (which leads to complex, low-coverage rules),
-        # we Greedily ADD conditions starting from the most frequent ones.
-        
-        # Min support to be considered a candidate
-        min_support = max(1, int(active_trees * 0.1))
-        
+        for i in range(n_use):
+            path = self._tree_paths[i].get(int(leaves[i]))
+            if path is None or not self._tree_vote(i, int(leaves[i]), class_idx):
+                continue
+            voting_trees += 1
+            for feat_idx in {c.feature_index for c in path}:
+                support[feat_idx] += weights[i]
+            for cond in path:
+                j = cond.feature_index
+                if cond.operator == '>':
+                    lows[j] = max(lows.get(j, -np.inf), cond.threshold)
+                else:
+                    highs[j] = min(highs.get(j, np.inf), cond.threshold)
+
+        # Consensus: support of M/2 + 1 trees, or more than half the weight
+        pool = [j for j, s in support.items() if s > total_weight / 2]
+        consensus = bool(pool)
+        if not consensus and support:
+            # No feature reaches consensus: fall back to the most supported one
+            pool = [max(support, key=support.get)]
+
         candidates = []
-        for (feat_idx, feat_name, op), thresholds in grouped_conditions.items():
-            if len(thresholds) >= min_support:
-                median_thresh = np.median(thresholds)
-                cond = Condition(feat_idx, feat_name, op, median_thresh)
-                # Score = frequency
-                candidates.append((len(thresholds), cond))
-        
-        # Sort candidates by frequency (descending)
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        
-        current_conditions = []
-        current_precision = 0.0
-        # Start with empty rule precision (global prior)
-        if X_background is not None:
-             prior_mask = np.ones(len(X_background), dtype=bool)
-             prior_prec = (self.model.predict(X_background) == prediction).mean()
-             current_precision = prior_prec
-        
-        max_conds = 6 # Limit complexity for interpretability
-        
-        # Helper for precision O(1) using vectorization
-        def get_metrics(conds):
-            if not conds: 
-                 if X_background is not None:
-                      return current_precision, 1.0
-                 return 0.0, 1.0
-                 
-            r = Rule(conds, prediction)
-            mask = r.evaluate_batch(X_background)
-            coverage = mask.mean()
-            if mask.sum() == 0: return 0.0, 0.0
-            prec = (self.model.predict(X_background[mask]) == prediction).mean()
-            return prec, coverage
+        for j in sorted(pool, key=lambda f: -support[f]):
+            if j in lows:
+                candidates.append(Condition(j, self.feature_names[j], '>', lows[j]))
+            if j in highs:
+                candidates.append(Condition(j, self.feature_names[j], '<=', highs[j]))
 
-        best_conditions = []
-        best_precision = current_precision
-        
-        # Iterate through top 15 candidates
-        for _, cand_cond in candidates[:15]:
-             # Propose adding this condition
-             proposal = best_conditions + [cand_cond]
-             proposal = simplify_conditions(proposal)
-             
-             prec, cov = get_metrics(proposal)
-             
-             # Heuristic: Accept if precision improves OR stays high (>0.95)
-             # If precision drops significantly, don't add.
-             
-             if prec >= best_precision:
-                  best_conditions = proposal
-                  best_precision = prec
-             elif prec >= self.min_precision:
-                  # Still good enough, and makes rule more specific?
-                  # Actually, we usually want minimal rule for target precision.
-                  # If we already have precision > min_precision, we stop?
-                  # Let's say we want to maximize precision.
-                  pass
-             
-             if best_precision >= self.min_precision:
-                  # We found a rule that explains it well enough!
-                  break
-                  
-             if len(best_conditions) >= max_conds:
-                  break
-        
-        # Fallback: If we ended up with nothing (or just prior), take top 1 feature
-        if not best_conditions and candidates:
-             best_conditions = [candidates[0][1]]
-             best_precision, _ = get_metrics(best_conditions)
-
-        # 5. Simplify
-        final_conditions = simplify_conditions(best_conditions)
-        rule = Rule(final_conditions, prediction)
-        
-        # 6. Final Metrics
+        # Phase 3: Consensus Pruning
         if X_background is not None:
-             precision, coverage = get_metrics(final_conditions)
+            X_background = np.asarray(X_background)
+            bg_pred = self._background_predictions(X_background)
+
+            def metrics(conds):
+                mask = Rule(conds, prediction).evaluate_batch(X_background)
+                if mask.sum() == 0:
+                    return 1.0, 0.0  # same convention as GPEExplainer
+                return (bg_pred[mask] == prediction).mean(), mask.mean()
+
+            conditions = list(candidates)
+            precision, coverage = metrics(conditions)
+            while len(conditions) > 1:
+                best = None
+                for i in range(len(conditions)):
+                    trial = conditions[:i] + conditions[i + 1:]
+                    p, c = metrics(trial)
+                    if p >= self.min_precision and (best is None or (p, c) > best[1:]):
+                        best = (i, p, c)
+                if best is None:
+                    break
+                conditions.pop(best[0])
+                precision, coverage = best[1], best[2]
         else:
-             precision, coverage = 1.0, 0.0
+            conditions = list(candidates)
+            precision, coverage = 1.0, 0.0
+
+        rule = Rule(conditions, prediction)
 
         return Explanation(
             instance=x,
             rule=rule,
             prediction=prediction,
-            precision=precision,
-            coverage=coverage,
-            method="GPE-Ensemble Forward",
+            precision=float(precision),
+            coverage=float(coverage),
+            original_rule=Rule(list(candidates), prediction),
+            method=f"GPE-Ensemble ({self.aggregation})",
             computation_time=time.time() - start_time,
-            metadata={'active_trees': active_trees, 'candidates': len(candidates)}
+            metadata={
+                'n_trees': n_use,
+                'voting_trees': voting_trees,
+                'candidates': len(candidates),
+                'consensus': consensus,
+                'meets_threshold': bool(precision >= self.min_precision),
+            }
         )
 
-    def _calculate_precision(self, rule, prediction, X):
-        mask = rule.evaluate_batch(X)
-        if mask.sum() == 0: return 0.0
-        return (self.model.predict(X[mask]) == prediction).mean()
-        
-    def _calculate_coverage(self, rule, X):
-        return rule.evaluate_batch(X).mean()
-    
     def explain_batch(self, X, X_background=None):
         return [self.explain(x, X_background) for x in X]

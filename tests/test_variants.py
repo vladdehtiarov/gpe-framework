@@ -12,7 +12,7 @@ from sklearn.ensemble import RandomForestClassifier
 import sys
 sys.path.insert(0, '..')
 from gpe import GPEExplainer, GPEOptimal, GPEWeighted, GPEMonotonic, GPEEnsemble
-from gpe.explanation import Explanation
+from gpe.explanation import Explanation, Condition, Rule
 
 
 class TestGPEOptimal:
@@ -179,6 +179,21 @@ class TestGPEMonotonic:
                     # Should only have '<' or '<=' conditions
                     assert cond.operator in ['<', '<='], \
                         f"Feature {cond.feature_name} with -1 constraint has {cond.operator}"
+    
+    def test_monotonic_single_condition_rule(self, setup):
+        """Test that constraints also apply when the path has one condition."""
+        X, y, model = setup
+        
+        explainer = GPEMonotonic(
+            model=model,
+            feature_names=['a', 'b', 'c', 'd'],
+            X_train=X,
+            monotonic_constraints={'a': +1}
+        )
+        rule = Rule([Condition(0, 'a', '<=', 0.0)], prediction=0)
+        
+        pruned = explainer._prune_phase(X[0], rule, X)
+        assert pruned.conditions == []
 
 
 class TestGPEEnsemble:
@@ -215,7 +230,7 @@ class TestGPEEnsemble:
         """Test different aggregation methods."""
         X, y, model = setup
         
-        for aggregation in ['majority', 'intersection', 'union']:
+        for aggregation in ['majority', 'weighted']:
             explainer = GPEEnsemble(
                 model=model,
                 feature_names=['a', 'b', 'c', 'd'],
@@ -227,6 +242,54 @@ class TestGPEEnsemble:
             
             assert isinstance(explanation, Explanation)
             assert aggregation in explanation.method
+    
+    def test_ensemble_invalid_aggregation(self, setup):
+        """Test that unknown aggregation modes raise error."""
+        X, y, model = setup
+        
+        with pytest.raises(ValueError):
+            GPEEnsemble(model=model, X_train=X, aggregation='union')
+    
+    def test_ensemble_precision_invariant(self, setup):
+        """Test that returned rules meet the precision threshold (Statement 2)."""
+        X, y, model = setup
+        
+        explainer = GPEEnsemble(model=model, X_train=X, min_precision=0.9)
+        
+        for x in X[:20]:
+            explanation = explainer.explain(x)
+            assert explanation.rule.evaluate(x)
+            if explanation.metadata['meets_threshold']:
+                assert explanation.precision >= 0.9
+            assert explanation.complexity <= len(explanation.original_rule.conditions)
+    
+    def test_ensemble_consensus_support(self, setup):
+        """Test that every rule feature is used by at least M/2 + 1 voting trees."""
+        X, y, model = setup
+        
+        explainer = GPEEnsemble(model=model, X_train=X)
+        n_trees = len(model.estimators_)
+        leaves = model.apply(X[:1])[0]
+        
+        explanation = explainer.explain(X[0])
+        assert explanation.metadata['consensus']
+        
+        for cond in explanation.rule.conditions:
+            used = sum(
+                cond.feature_index in {c.feature_index for c in explainer._tree_paths[i][leaves[i]]}
+                for i in range(n_trees)
+            )
+            assert used >= n_trees // 2 + 1
+    
+    def test_ensemble_weighted_uses_tree_accuracy(self, setup):
+        """Test that weighted aggregation weights trees by their accuracy."""
+        X, y, model = setup
+        
+        explainer = GPEEnsemble(model=model, X_train=X, y_train=y, aggregation='weighted')
+        
+        assert explainer._tree_weights.shape == (len(model.estimators_),)
+        assert np.all((explainer._tree_weights > 0) & (explainer._tree_weights <= 1))
+        assert not np.allclose(explainer._tree_weights, 1.0)
     
     def test_ensemble_invalid_model(self):
         """Test that single trees raise error."""
