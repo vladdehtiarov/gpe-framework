@@ -3,6 +3,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PyPI version](https://badge.fury.io/py/gpe-framework.svg)](https://badge.fury.io/py/gpe-framework)
+[![Tests](https://github.com/vladdehtiarov/gpe-framework/actions/workflows/tests.yml/badge.svg)](https://github.com/vladdehtiarov/gpe-framework/actions/workflows/tests.yml)
 
 **GPE (Greedy-Prune-Explain)** is a novel method for generating minimal, interpretable local explanations for decision tree predictions. Unlike existing methods like LIME, SHAP, or Anchors, GPE leverages the inherent structure of decision trees to produce explanations that are:
 
@@ -97,7 +98,7 @@ from gpe import (
     GPEInformationTheoretic, # Uses mutual information for pruning
     GPECounterfactual,       # Adds counterfactual explanations
     GPEOptimal,              # Exhaustive search for minimal rule
-    GPEEnsemble              # For Random Forest, XGBoost
+    GPEEnsemble              # For Random Forest, Gradient Boosting
 )
 
 # GPE-IT: Uses mutual information I(condition; prediction)
@@ -109,6 +110,32 @@ gpe_cf = GPECounterfactual(model, feature_names=features, X_train=X)
 cf_explanation = gpe_cf.explain_with_counterfactual(x)
 print(f"To change the decision: {cf_explanation.changes}")
 ```
+
+### GPE-Ensemble
+
+`GPEEnsemble` explains Random Forest predictions with a consensus rule in three phases:
+
+1. **Path Extraction** — the decision path of `x` in every tree, together with the tree's vote
+2. **Threshold Aggregation** — for each feature, the bounds of the trees that voted for the ensemble's class are intersected into `[low_j, high_j]`; a feature becomes a candidate when at least `M/2 + 1` trees use it (`aggregation='majority'`) or when the trees using it hold more than half of the total weight (`aggregation='weighted'`, trees weighted by their accuracy on the training data)
+3. **Consensus Pruning** — conditions are greedily removed while precision on the background set stays at or above `min_precision`
+
+```python
+from gpe import GPEEnsemble
+
+explainer = GPEEnsemble(rf_model, feature_names=features, X_train=X_bg,
+                        min_precision=0.95, aggregation='majority')
+explanation = explainer.explain(x)
+explanation.metadata  # voting_trees, candidates, consensus, meets_threshold
+```
+
+RandomForest with 50 trees (max_depth=8), 50 test instances × 3 runs, 100 background samples
+(`experiments/run_ensemble_benchmark.py`, v1.2.0, Apple M1 Pro):
+
+| Dataset | Time (ms) | Complexity | Precision | Coverage |
+|---------|-----------|------------|-----------|----------|
+| Credit Risk | 28.8 ± 2.8 | 1.8 | 0.982 | 0.223 |
+| Credit Card Fraud | 30.8 ± 6.1 | 1.0 | 1.000 | 0.902 |
+| Lending Club | 33.6 ± 9.0 | 1.0 | 1.000 | 0.885 |
 
 ## 📖 How It Works
 
@@ -168,7 +195,7 @@ gpe-framework/
 │   ├── __init__.py          # Public API
 │   ├── core.py              # GPEExplainer
 │   ├── novel_methods.py     # GPE-IT, GPE-CF (scientific contribution)
-│   ├── variants.py          # GPEOptimal, GPEWeighted
+│   ├── variants.py          # GPEOptimal, GPEWeighted, GPEMonotonic, GPEEnsemble
 │   ├── explanation.py       # Data structures
 │   ├── metrics.py           # Evaluation metrics
 │   ├── tree_utils.py        # Tree utilities
@@ -209,11 +236,20 @@ MIT License - see [LICENSE](LICENSE) file for details.
 If you use GPE in your research, please cite:
 
 ```bibtex
-@article{dehtiarov2025gpe,
-  title={Greedy-Prune-Explain: Minimal Local Explanations for Decision Tree Predictions},
+@article{dehtiarov2026gpe,
+  title={The Greedy-Prune-Explain Method for Fast Generation of Local Explanations from Decision Trees in Binary Classification Tasks},
   author={Dehtiarov, Vladyslav and Borovyk, Valentyna},
-  journal={International Journal of Artificial Intelligence Research},
-  year={2025}
+  journal={Nauka i tekhnika sohodni (Science and Technology Today)},
+  year={2026},
+  note={Accepted for publication}
+}
+
+@article{dehtiarov2026gpeensemble,
+  title={The GPE-Ensemble Algorithm: Extending Local Explainability to Ensemble Decision-Tree Models},
+  author={Dehtiarov, Vladyslav and Borovyk, Valentyna},
+  journal={Nauka i tekhnika sohodni (Science and Technology Today)},
+  year={2026},
+  note={Accepted for publication}
 }
 ```
 

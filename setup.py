@@ -10,7 +10,7 @@ long_description = readme_path.read_text(encoding="utf-8") if readme_path.exists
 
 setup(
     name="gpe-framework",
-    version="1.1.0",
+    version="1.2.0",
     author="Vladyslav Dehtiarov",
     author_email="vvdehtiarov@gmail.com",
     description="Greedy-Prune-Explain: Minimal local explanations for decision tree predictions",
@@ -36,11 +36,12 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     python_requires=">=3.8",
     install_requires=[
-        "numpy>=1.20.0,<2.0.0",
+        "numpy>=1.20.0",
         "pandas>=1.3.0",
         "scikit-learn>=1.0.0",
         "scipy>=1.7.0",
