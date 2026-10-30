@@ -309,6 +309,64 @@ def load_synthetic_complex(
     return X_train, X_test, y_train, y_test, feature_names, class_names
 
 
+def load_student_performance(
+    subset: str = "merged"
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str], List[str]]:
+    """
+    Load the UCI Student Performance dataset (Cortez & Silva, 2008).
+
+    Predicts whether a secondary-school student passes the final grade G3
+    (pass = G3 >= 10) from 30 demographic, social, and school-related features.
+
+    Args:
+        subset: one of "mat" (Mathematics, 395 students),
+            "por" (Portuguese, 649 students), or "merged"
+            (concatenation of both, 1044 rows).
+
+    Returns:
+        X_train, X_test, y_train, y_test, feature_names, class_names
+    """
+    import os
+    import pandas as pd
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    docs_dir = os.path.normpath(os.path.join(here, "..", "..", "docs"))
+
+    if subset == "mat":
+        files = ["student-mat.csv"]
+    elif subset == "por":
+        files = ["student-por.csv"]
+    elif subset == "merged":
+        files = ["student-mat.csv", "student-por.csv"]
+    else:
+        raise ValueError(f"Unknown subset: {subset}")
+
+    frames = [pd.read_csv(os.path.join(docs_dir, f), sep=";") for f in files]
+    df = pd.concat(frames, ignore_index=True)
+
+    # Target: pass if final grade G3 >= 10 (Portuguese system pass threshold)
+    y = (df["G3"] >= 10).astype(int).values
+
+    # Drop grade columns to avoid target leakage; G1 and G2 trivially predict G3.
+    X_df = df.drop(columns=["G1", "G2", "G3"])
+
+    from sklearn.preprocessing import LabelEncoder
+
+    feature_names = list(X_df.columns)
+    X_encoded = X_df.copy()
+    for col in X_df.columns:
+        if X_df[col].dtype == "object":
+            X_encoded[col] = LabelEncoder().fit_transform(X_df[col].astype(str))
+
+    X = X_encoded.values.astype(float)
+    class_names = ["fail", "pass"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    return X_train, X_test, y_train, y_test, feature_names, class_names
+
+
 # Registry of all datasets
 DATASETS = {
     'iris': load_iris,
@@ -317,6 +375,7 @@ DATASETS = {
     'adult': load_adult,
     'german_credit': load_german_credit,
     'credit_default': load_credit_default,
+    'student_performance': load_student_performance,
     'synthetic_simple': load_synthetic_simple,
     'synthetic_complex': load_synthetic_complex,
 }
