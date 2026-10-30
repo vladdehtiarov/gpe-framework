@@ -11,7 +11,7 @@
 - `aggregation='weighted'`: tree votes weighted by individual accuracy on the training data (`y_train` optional; ensemble predictions are used when omitted).
 - `Explanation.metadata` for `GPEEnsemble`: `voting_trees`, `candidates`, `consensus`, `meets_threshold`.
 - Student Performance dataset loader and benchmark; ensemble benchmark script.
-- CI on Python 3.9–3.13.
+- CI on Python 3.10–3.13.
 
 ### Fixed
 - `GPEMonotonic` ignored constraints on single-condition rules.
