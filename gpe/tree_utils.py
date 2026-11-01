@@ -67,7 +67,8 @@ def get_decision_path(
             feature_name=feature_names[feature_idx],
             operator=operator,
             threshold=threshold,
-            is_categorical=False
+            is_categorical=False,
+            float32_input=True
         )
         conditions.append(condition)
     
@@ -86,6 +87,99 @@ def get_decision_path(
         conditions=conditions,
         prediction=prediction,
         confidence=confidence
+    )
+
+
+def get_leaf_paths(
+    tree,
+    feature_names: Optional[List[str]] = None
+) -> Dict[int, List[Tuple[int, Condition]]]:
+    """
+    Map every leaf to its root-to-leaf literals, in depth order.
+    
+    Args:
+        tree: A fitted sklearn decision tree
+        feature_names: Optional list of feature names
+        
+    Returns:
+        Dictionary: leaf node ID -> list of (internal node ID, literal)
+    """
+    tree_ = tree.tree_
+    if feature_names is None:
+        feature_names = [f"feature_{i}" for i in range(tree_.n_features)]
+    
+    paths: Dict[int, List[Tuple[int, Condition]]] = {}
+    stack: List[Tuple[int, List[Tuple[int, Condition]]]] = [(0, [])]
+    while stack:
+        node, path = stack.pop()
+        left, right = tree_.children_left[node], tree_.children_right[node]
+        if left == right:
+            paths[int(node)] = path
+            continue
+        feature = int(tree_.feature[node])
+        threshold = float(tree_.threshold[node])
+        name = feature_names[feature]
+        for child, operator in ((left, '<='), (right, '>')):
+            literal = Condition(feature, name, operator, threshold, float32_input=True)
+            stack.append((child, path + [(int(node), literal)]))
+    return paths
+
+
+def representative_instance(tree, path: List[Tuple[int, Condition]]) -> np.ndarray:
+    """
+    Build an instance that reaches the leaf at the end of a path.
+    
+    Values are float32-representable, so the split tests see them unchanged.
+    Features not on the path are set to 0.
+    
+    Args:
+        tree: A fitted sklearn decision tree
+        path: Literals of one leaf, as returned by get_leaf_paths
+        
+    Returns:
+        Feature vector (1D array)
+    """
+    lows: Dict[int, float] = {}
+    highs: Dict[int, float] = {}
+    for _, literal in path:
+        j = literal.feature_index
+        if literal.operator == '>':
+            lows[j] = max(lows.get(j, -np.inf), literal.threshold)
+        else:
+            highs[j] = min(highs.get(j, np.inf), literal.threshold)
+    
+    x = np.zeros(tree.tree_.n_features, dtype=np.float64)
+    for j in set(lows) | set(highs):
+        if j in highs:
+            value = np.float32(highs[j])
+            if float(value) > highs[j]:
+                value = np.nextafter(value, np.float32(-np.inf))
+        else:
+            value = np.float32(lows[j])
+            if float(value) <= lows[j]:
+                value = np.nextafter(value, np.float32(np.inf))
+        x[j] = float(value)
+    return x
+
+
+def literal_importance(tree, node_id: int) -> float:
+    """
+    Weighted impurity decrease of a split, taken from the fitted tree alone.
+    
+    Args:
+        tree: A fitted sklearn decision tree
+        node_id: Internal node ID
+        
+    Returns:
+        Impurity decrease weighted by the training samples in the node
+    """
+    tree_ = tree.tree_
+    left, right = tree_.children_left[node_id], tree_.children_right[node_id]
+    weights = tree_.weighted_n_node_samples
+    return float(
+        weights[node_id] * tree_.impurity[node_id]
+        - weights[left] * tree_.impurity[left]
+        - weights[right] * tree_.impurity[right]
     )
 
 
@@ -325,7 +419,8 @@ def extract_rules_from_tree(
             feature_index=feature_idx,
             feature_name=feature_names[feature_idx],
             operator='<=',
-            threshold=threshold
+            threshold=threshold,
+            float32_input=True
         )
         conditions.append(left_condition)
         recurse(tree_.children_left[node_id], conditions)
@@ -336,7 +431,8 @@ def extract_rules_from_tree(
             feature_index=feature_idx,
             feature_name=feature_names[feature_idx],
             operator='>',
-            threshold=threshold
+            threshold=threshold,
+            float32_input=True
         )
         conditions.append(right_condition)
         recurse(tree_.children_right[node_id], conditions)

@@ -95,6 +95,7 @@ This explanation covers 33.3% of similar cases with 100.0% accuracy.
 ```python
 from gpe import (
     GPEExplainer,            # Standard (fast, greedy)
+    CertifiedGPE,            # Finite-sample precision guarantee
     GPEInformationTheoretic, # Uses mutual information for pruning
     GPECounterfactual,       # Adds counterfactual explanations
     GPEOptimal,              # Exhaustive search for minimal rule
@@ -180,12 +181,49 @@ coverage = coverage_score(explanation, X)
 complexity = complexity_score(explanation)
 ```
 
-## 🔬 Scientific Novelty
+## 🔒 Certified-GPE
 
-1. **GPE-Core** — First local explanation method specifically designed for decision trees
-2. **GPE-IT** — Novel use of mutual information I(condition; prediction) for condition selection
-3. **Theoretical guarantees** — Proven precision bounds and O(n·d) complexity
-4. **Practical efficiency** — 48x faster than LIME on real data
+`GPEExplainer` checks precision on the background data, so the rule it picks can fall below the threshold on new data. `CertifiedGPE` gives a finite-sample guarantee instead: with probability at least `1 - delta` over the calibration set, the rule's population precision is at least `min_precision`.
+
+```python
+from gpe import CertifiedGPE
+
+# X_cal must not have been used to fit or tune the tree
+explainer = CertifiedGPE(model, X_cal, min_precision=0.95, delta=0.05)
+explanation = explainer.explain(x)
+
+cert = explanation.certificate
+print(explanation.rule, cert.lower_bound, cert.K, cert.n, cert.trivial)
+```
+
+The rule comes from the subsets of the decision path. The levels of a Clopper-Pearson bound are split over all `2^k - 2` subsets (Berk et al., 2013; Angelopoulos et al., 2025), so the guarantee covers any search. Up to 20 literals `search='auto'` enumerates all subsets and returns a shortest certified rule; above that it is greedy.
+
+What it does not cover:
+
+- It concerns fidelity to the model under the calibration distribution, not the correctness of the prediction. It does not survive distribution shift or a refit.
+- It holds for one explanation at a time. For the whole tree at once use `compile_explanations(explainer, simultaneous=True)`.
+- It is conservative and needs data. A rule with no errors needs `min_coverage(k)` calibration rows: 194 at `k=10`, `tau=0.95`, `delta=0.05`. When nothing can be certified, the full path is returned with `cert.trivial=True`; its precision is exactly 1 because its region lies inside one leaf.
+- `interval='wilson'` has no finite-sample coverage, and its certificates carry `guarantee=False`.
+- With imbalanced classes, high precision can just mean the base rate. Use `min_lift` to require the rule to beat it.
+
+## 📦 Compiled Explanations
+
+For `GPEExplainer`, `GPEInformationTheoretic` and `CertifiedGPE`, the explanation of an instance depends only on its leaf. All rules can be computed once and looked up without background data:
+
+```python
+from gpe import compile_explanations
+
+table = compile_explanations(explainer)
+explanation = table.explain(x)
+arrays = table.to_arrays()     # leaf_ids, bit masks over the path, K, n
+print(table.storage_bytes())   # size on top of the tree itself
+```
+
+## 🔬 Method Properties
+
+1. **GPE-Core** — rules from subsets of the decision path, evaluated on real data rather than perturbations
+2. **GPE-IT** — literal order from conditional mutual information; a heuristic with no guarantee
+3. **Certified-GPE** — finite-sample lower bound on population precision
 
 ## 📁 Project Structure
 
@@ -194,6 +232,8 @@ gpe-framework/
 ├── gpe/
 │   ├── __init__.py          # Public API
 │   ├── core.py              # GPEExplainer
+│   ├── certified.py         # CertifiedGPE, confidence bounds
+│   ├── compiled.py          # compile_explanations: leaf-to-rule table
 │   ├── novel_methods.py     # GPE-IT, GPE-CF (scientific contribution)
 │   ├── variants.py          # GPEOptimal, GPEWeighted, GPEMonotonic, GPEEnsemble
 │   ├── explanation.py       # Data structures

@@ -401,12 +401,12 @@ class GPEEnsemble:
 
             # Right child (>)
             right_child = tree_.children_right[node_id]
-            right_cond = Condition(feature_idx, feat_name, '>', threshold)
+            right_cond = Condition(feature_idx, feat_name, '>', threshold, float32_input=True)
             stack.append((right_child, current_conds + [right_cond]))
 
             # Left child (<=)
             left_child = tree_.children_left[node_id]
-            left_cond = Condition(feature_idx, feat_name, '<=', threshold)
+            left_cond = Condition(feature_idx, feat_name, '<=', threshold, float32_input=True)
             stack.append((left_child, current_conds + [left_cond]))
 
     def _votes_by_class(self) -> bool:
@@ -511,9 +511,9 @@ class GPEEnsemble:
         candidates = []
         for j in sorted(pool, key=lambda f: -support[f]):
             if j in lows:
-                candidates.append(Condition(j, self.feature_names[j], '>', lows[j]))
+                candidates.append(Condition(j, self.feature_names[j], '>', lows[j], float32_input=True))
             if j in highs:
-                candidates.append(Condition(j, self.feature_names[j], '<=', highs[j]))
+                candidates.append(Condition(j, self.feature_names[j], '<=', highs[j], float32_input=True))
 
         # Phase 3: Consensus Pruning
         if X_background is not None:

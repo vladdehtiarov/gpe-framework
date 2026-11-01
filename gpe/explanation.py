@@ -9,9 +9,17 @@ This module defines the core data structures used to represent explanations:
 Author: Vladyslav Dehtiarov
 """
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import List, Optional, Dict, Any, Union
 import numpy as np
+
+
+def _round_down_to_float32(value: float) -> np.float32:
+    """Largest float32 that does not exceed value."""
+    rounded = np.float32(value)
+    if float(rounded) > value:
+        rounded = np.nextafter(rounded, np.float32(-np.inf))
+    return rounded
 
 
 @dataclass
@@ -28,12 +36,16 @@ class Condition:
         operator: Comparison operator ('<=', '>', '==', '!=', 'in')
         threshold: Value to compare against
         is_categorical: Whether this is a categorical feature
+        float32_input: Compare the feature value after rounding it to float32.
+            sklearn trees do this before every split test, so conditions taken
+            from a tree need it to select exactly the rows the tree sends there.
     """
     feature_index: int
     feature_name: str
     operator: str  # '<=', '>', '==', '!=', 'in'
     threshold: Union[float, int, str, List]
     is_categorical: bool = False
+    float32_input: bool = False
     
     def __post_init__(self):
         """Validate the condition."""
@@ -52,15 +64,19 @@ class Condition:
             True if the condition is satisfied, False otherwise
         """
         value = x[self.feature_index]
+        threshold = self.threshold
+        if self.float32_input:
+            value = float(np.float32(value))
+            threshold = float(threshold)
         
         if self.operator == '<=':
-            return value <= self.threshold
+            return value <= threshold
         elif self.operator == '<':
-            return value < self.threshold
+            return value < threshold
         elif self.operator == '>':
-            return value > self.threshold
+            return value > threshold
         elif self.operator == '>=':
-            return value >= self.threshold
+            return value >= threshold
         elif self.operator == '==':
             return value == self.threshold
         elif self.operator == '!=':
@@ -91,7 +107,8 @@ class Condition:
             'feature_name': self.feature_name,
             'operator': self.operator,
             'threshold': self.threshold,
-            'is_categorical': self.is_categorical
+            'is_categorical': self.is_categorical,
+            'float32_input': self.float32_input
         }
     
     @classmethod
@@ -153,15 +170,25 @@ class Rule:
         result = np.ones(X.shape[0], dtype=bool)
         for cond in self.conditions:
             values = X[:, cond.feature_index]
+            threshold = cond.threshold
+            if cond.float32_input:
+                if cond.operator in ('<=', '>'):
+                    # For float32 v and float64 t, v <= t iff v <= (t rounded
+                    # down to float32), which needs no float64 copy of the column.
+                    values = values.astype(np.float32, copy=False)
+                    threshold = _round_down_to_float32(threshold)
+                else:
+                    values = values.astype(np.float32).astype(np.float64)
+                    threshold = float(threshold)
             
             if cond.operator == '<=':
-                mask = values <= cond.threshold
+                mask = values <= threshold
             elif cond.operator == '<':
-                mask = values < cond.threshold
+                mask = values < threshold
             elif cond.operator == '>':
-                mask = values > cond.threshold
+                mask = values > threshold
             elif cond.operator == '>=':
-                mask = values >= cond.threshold
+                mask = values >= threshold
             elif cond.operator == '==':
                 mask = values == cond.threshold
             elif cond.operator == '!=':
@@ -225,6 +252,59 @@ class Rule:
 
 
 @dataclass
+class Certificate:
+    """
+    Statistical certificate of a rule produced by CertifiedGPE.
+    
+    Attributes:
+        K: Calibration rows in the rule region that the model assigns to the class
+        n: Calibration rows in the rule region
+        lower_bound: Lower confidence bound on the rule's population precision.
+            1.0 for the full path, whose region lies inside one leaf.
+        alpha: Level of the bound; None for the full path, which needs no test
+        delta: Total error budget
+        min_precision: Target precision tau
+        interval: 'clopper_pearson', 'hoeffding' or 'wilson'
+        alpha_scheme: 'uniform', 'layered' or 'chain'
+        search: 'exact', 'greedy', 'chain' or 'none'
+        family_size: Number of hypotheses on this path (alpha shows the level used)
+        trivial: True when the rule is the full path
+        guarantee: False for 'wilson', whose coverage holds only asymptotically
+        base_rate: Share of calibration rows the model assigns to the class
+        min_lift: Required additive lift gamma, if any
+        base_rate_upper: Upper confidence bound on the class share (lift mode)
+        lift_lower_bound: lower_bound - base_rate_upper (lift mode)
+        meets_lift: Whether lift_lower_bound >= min_lift (lift mode)
+    """
+    K: int
+    n: int
+    lower_bound: float
+    alpha: Optional[float]
+    delta: float
+    min_precision: float
+    interval: str
+    alpha_scheme: str
+    search: str
+    family_size: int
+    trivial: bool
+    guarantee: bool
+    base_rate: float = 0.0
+    min_lift: Optional[float] = None
+    base_rate_upper: Optional[float] = None
+    lift_lower_bound: Optional[float] = None
+    meets_lift: Optional[bool] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return asdict(self)
+    
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'Certificate':
+        """Create from dictionary."""
+        return cls(**d)
+
+
+@dataclass
 class Explanation:
     """
     Complete explanation for a single instance.
@@ -241,6 +321,7 @@ class Explanation:
         method: Name of the method used to generate the explanation
         computation_time: Time taken to generate the explanation (seconds)
         metadata: Additional metadata
+        certificate: Statistical certificate (CertifiedGPE only)
     """
     instance: np.ndarray
     rule: Rule
@@ -251,6 +332,7 @@ class Explanation:
     method: str = "GPE"
     computation_time: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    certificate: Optional[Certificate] = None
     
     @property
     def complexity(self) -> int:
@@ -308,7 +390,8 @@ class Explanation:
             'original_rule': self.original_rule.to_dict() if self.original_rule else None,
             'method': self.method,
             'computation_time': self.computation_time,
-            'metadata': self.metadata
+            'metadata': self.metadata,
+            'certificate': self.certificate.to_dict() if self.certificate else None
         }
     
     @classmethod
@@ -323,7 +406,8 @@ class Explanation:
             original_rule=Rule.from_dict(d['original_rule']) if d.get('original_rule') else None,
             method=d.get('method', 'GPE'),
             computation_time=d.get('computation_time', 0.0),
-            metadata=d.get('metadata', {})
+            metadata=d.get('metadata', {}),
+            certificate=Certificate.from_dict(d['certificate']) if d.get('certificate') else None
         )
     
     def to_natural_language(self) -> str:

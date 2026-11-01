@@ -244,7 +244,12 @@ class GPEExplainer:
             computation_time=computation_time,
             metadata={
                 'min_precision': self.min_precision,
-                'simplify': self.simplify
+                'simplify': self.simplify,
+                # 0 means the reported precision of 1.0 rests on no rows
+                'n_background': (
+                    int(round(coverage * len(X_background)))
+                    if X_background is not None else None
+                )
             }
         )
     

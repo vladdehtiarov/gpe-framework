@@ -45,13 +45,17 @@ Email: vvdehtiarov@gmail.com
 License: MIT
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __author__ = "Vladyslav Dehtiarov"
 __email__ = "vvdehtiarov@gmail.com"
 __license__ = "MIT"
 
 # Core
 from .core import GPEExplainer
+
+# Certified explanations and leaf tables
+from .certified import CertifiedGPE, lower_bound, min_coverage
+from .compiled import CompiledExplanations, compile_explanations
 
 # Variants
 from .variants import (
@@ -75,6 +79,7 @@ from .novel_methods import (
 
 # Data Structures
 from .explanation import (
+    Certificate,
     Explanation,
     Rule,
     Condition
@@ -107,6 +112,14 @@ __all__ = [
     
     # Core Explainer
     "GPEExplainer",
+    
+    # Certified explanations and leaf tables
+    "CertifiedGPE",
+    "Certificate",
+    "CompiledExplanations",
+    "compile_explanations",
+    "lower_bound",
+    "min_coverage",
     
     # Variants
     "GPEOptimal",

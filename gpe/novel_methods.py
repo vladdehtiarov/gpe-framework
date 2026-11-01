@@ -32,10 +32,11 @@ class GPEInformationTheoretic(GPEExplainer):
     """
     GPE with Information-Theoretic Pruning.
     
-    Instead of greedy removal based on precision alone, this method uses
-    mutual information I(condition; prediction) to select which conditions
-    to keep. Conditions with higher mutual information are more important
-    for the prediction.
+    Instead of greedy removal based on precision alone, this method adds
+    literals in order of mutual information with the model's prediction,
+    conditional on the literals selected so far, until the precision threshold
+    is met on the background data. It is a heuristic for the order of the search
+    and carries no statistical guarantee.
     
     The mutual information is calculated as:
         I(C; Y) = H(Y) - H(Y|C)
@@ -44,19 +45,13 @@ class GPEInformationTheoretic(GPEExplainer):
         - H(Y) is the entropy of predictions
         - H(Y|C) is the conditional entropy given the condition
     
-    This provides a principled, information-theoretic foundation for
-    selecting the most informative conditions.
-    
     Parameters:
         model: Fitted decision tree
         feature_names: List of feature names
         X_train: Training data
         min_precision: Minimum precision threshold (default: 0.95)
-        min_mutual_info: Minimum mutual information threshold (default: 0.01)
-    
-    Scientific Contribution:
-        First application of mutual information for condition selection
-        in local tree explanations.
+        min_mutual_info: Kept for compatibility, has no effect since 1.3.0.
+            Skipping low-information literals made rules miss min_precision.
     """
     
     def __init__(
@@ -96,18 +91,7 @@ class GPEInformationTheoretic(GPEExplainer):
         h_y = self._calculate_entropy(y)
         
         # Evaluate condition on all instances
-        values = X[:, condition.feature_index]
-        
-        if condition.operator == '<=':
-            mask = values <= condition.threshold
-        elif condition.operator == '<':
-            mask = values < condition.threshold
-        elif condition.operator == '>':
-            mask = values > condition.threshold
-        elif condition.operator == '>=':
-            mask = values >= condition.threshold
-        else:
-            return 0.0
+        mask = Rule(conditions=[condition]).evaluate_batch(X)
         
         # H(Y|C) - conditional entropy
         p_true = mask.mean()
@@ -130,51 +114,37 @@ class GPEInformationTheoretic(GPEExplainer):
         X_background: Optional[np.ndarray] = None
     ) -> Rule:
         """
-        Information-theoretic pruning.
+        Information-theoretic literal selection.
         
-        Removes conditions with low mutual information while maintaining
-        precision threshold.
+        Adds literals in order of mutual information with the model's
+        prediction, conditional on the literals already selected, until the
+        precision threshold is met. Every literal stays available, so the
+        search ends at the full path at worst, and the full path has
+        precision 1 against the model.
         """
         if X_background is None or len(rule.conditions) <= 1:
             return rule
         
         prediction = self.model.predict(x.reshape(1, -1))[0]
         y_pred = self.model.predict(X_background)
+        agrees = y_pred == prediction
         
-        # Calculate mutual information for each condition
-        condition_mi = []
-        for cond in rule.conditions:
-            mi = self._calculate_mutual_information(cond, X_background, y_pred)
-            condition_mi.append((cond, mi))
+        remaining = list(rule.conditions)
+        selected: List[Condition] = []
+        mask = np.ones(len(X_background), dtype=bool)
         
-        # Sort by mutual information (descending)
-        condition_mi.sort(key=lambda x: x[1], reverse=True)
-        
-        # Greedily add conditions until precision is met
-        selected_conditions = []
-        
-        for cond, mi in condition_mi:
-            if mi < self.min_mutual_info:
-                continue
-            
-            test_conditions = selected_conditions + [cond]
-            test_rule = Rule(conditions=test_conditions, prediction=prediction)
-            
-            precision = self._calculate_precision(test_rule, prediction, X_background)
-            
-            selected_conditions.append(cond)
-            
-            if precision >= self.min_precision:
+        while remaining:
+            scores = [
+                self._calculate_mutual_information(cond, X_background[mask], y_pred[mask])
+                for cond in remaining
+            ]
+            best = remaining.pop(int(np.argmax(scores)))
+            selected.append(best)
+            mask &= Rule(conditions=[best]).evaluate_batch(X_background)
+            if mask.any() and agrees[mask].mean() >= self.min_precision:
                 break
         
-        # Ensure at least one condition
-        if len(selected_conditions) == 0:
-            selected_conditions = [condition_mi[0][0]] if condition_mi else []
-        
-        return Rule(
-            conditions=selected_conditions,
-            prediction=prediction
-        )
+        return Rule(conditions=selected, prediction=prediction)
     
     def explain(self, x: np.ndarray, X_background: Optional[np.ndarray] = None) -> Explanation:
         """Generate explanation with mutual information scores."""

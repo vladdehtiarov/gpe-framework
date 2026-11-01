@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0 — unreleased
+
+### Added
+- `CertifiedGPE`: rules from the decision path with a finite-sample lower bound on population precision, computed on a separate calibration set `X_cal`. Parameters: `delta`, `interval` (`clopper_pearson`, `hoeffding`, `wilson`), `alpha_scheme` (`uniform`, `layered`, `chain`), `search` (`exact` up to 20 literals by default, `greedy`), `min_lift`.
+- `Certificate` on `Explanation`: K, n, lower bound, alpha, budget and lift fields.
+- `compile_explanations()` and `CompiledExplanations`: a leaf-to-rule table with bit masks over the path, for lookups without background data. `simultaneous=True` makes certificates hold for the whole tree at once.
+- `lower_bound()`, `min_coverage()`.
+- `Explanation.metadata['n_background']` in `GPEExplainer`: 0 means the reported precision of 1.0 rests on no rows.
+- `experiments/stage0_facts.py`.
+
+### Fixed
+- `GPEInformationTheoretic` could return rules below `min_precision` (in 1.2.0, up to 98.7% of explanations on a synthetic set): literals under `min_mutual_info` were skipped, so the search could stop short of the full path. It now selects by conditional mutual information and always reaches `min_precision` on the background data. `min_mutual_info` has no effect any more. Published GPE-IT numbers came from the old behaviour.
+- Conditions taken from a tree now round the feature value to float32 before comparing, as sklearn does, so a path rule selects exactly the rows of its leaf.
+
 ## 1.2.0 — 2026-10-30
 
 ### Changed
