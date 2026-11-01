@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.0 — unreleased
+## 1.3.0 — 2026-11-02
 
 ### Added
 - `CertifiedGPE`: rules from the decision path with a finite-sample lower bound on population precision, computed on a separate calibration set `X_cal`. Parameters: `delta`, `interval` (`clopper_pearson`, `hoeffding`, `wilson`), `alpha_scheme` (`uniform`, `layered`, `chain`), `search` (`exact` up to 20 literals by default, `greedy`), `min_lift`.
