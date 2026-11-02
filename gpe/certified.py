@@ -36,7 +36,7 @@ from scipy.stats import beta, norm
 
 from .core import GPEExplainer, as_instance, as_matrix
 from .explanation import Certificate, Condition, Explanation, Rule
-from .tree_utils import literal_importance
+from .tree_utils import _path_nodes, literal_importance
 
 INTERVALS = ('clopper_pearson', 'hoeffding', 'wilson')
 ALPHA_SCHEMES = ('uniform', 'layered', 'chain')
@@ -483,7 +483,7 @@ class CertifiedGPE(GPEExplainer):
         from .tree_utils import literal_importance
 
         tree_ = self.model.tree_
-        nodes = self.model.decision_path(x.reshape(1, -1)).indices[:-1]
+        nodes = _path_nodes(self.model, x)[:-1]
         importance = []
         for cond in conditions:
             matches = [

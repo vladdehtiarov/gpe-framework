@@ -80,6 +80,30 @@ class TestSimplifyByBruteForce:
         assert simplify_conditions([Condition(0, "x", "<", 1.0), Condition(0, "x", "<=", 1.0)]) == [Condition(0, "x", "<", 1.0)]
 
 
+class TestPathRouting:
+    """The path has to end where predict goes, also on versions of sklearn whose decision_path does not."""
+
+    @pytest.mark.parametrize("seed", range(3))
+    def test_path_ends_in_the_leaf_of_apply(self, seed):
+        rng = np.random.default_rng(seed)
+        X = rng.normal(size=(1500, 4))
+        y = (X[:, 0] + X[:, 1] > 0).astype(int)
+        X[rng.random(X.shape) < 0.2] = np.nan
+        tree = DecisionTreeClassifier(max_depth=6, random_state=seed).fit(X, y)
+        leaves = tree.apply(X)
+        for i, x in enumerate(X[:400]):
+            assert tree_utils._path_nodes(tree, x)[-1] == leaves[i]
+            assert get_decision_path(tree, x).evaluate(x)
+
+    def test_each_step_follows_a_child(self):
+        X, y = data()
+        tree = DecisionTreeClassifier(max_depth=4, random_state=0).fit(X, y)
+        nodes = tree_utils._path_nodes(tree, X[0])
+        assert nodes[0] == 0 and nodes[-1] == tree.apply(X[:1])[0]
+        for parent, child in zip(nodes, nodes[1:]):
+            assert child in (tree.tree_.children_left[parent], tree.tree_.children_right[parent])
+
+
 class TestRegressionTrees:
     def test_paths_and_rules_of_a_regressor(self):
         X, y = data()

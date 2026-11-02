@@ -24,6 +24,29 @@ def _matches_missing(tree_, node_id: int, went_left: bool) -> bool:
     return bool(tree_.missing_go_to_left[node_id]) == went_left
 
 
+def _path_nodes(tree, x: np.ndarray) -> List[int]:
+    """
+    Nodes from the root to the leaf of x, as predict routes it.
+    
+    tree.decision_path is not used: in scikit-learn 1.7 it sends a missing value
+    to the right child whatever the split learned, unlike apply and predict.
+    """
+    tree_ = tree.tree_
+    missing_left = getattr(tree_, 'missing_go_to_left', None)
+    values = np.asarray(x, dtype=np.float32)
+    node = 0
+    nodes = [node]
+    while tree_.children_left[node] != tree_.children_right[node]:
+        value = values[tree_.feature[node]]
+        if value != value:
+            go_left = missing_left is not None and bool(missing_left[node])
+        else:
+            go_left = value <= tree_.threshold[node]
+        node = int(tree_.children_left[node] if go_left else tree_.children_right[node])
+        nodes.append(node)
+    return nodes
+
+
 def get_decision_path(
     tree,
     x: np.ndarray,
@@ -43,8 +66,7 @@ def get_decision_path(
     tree_ = tree.tree_
     
     # Get the path through the tree
-    node_indicator = tree.decision_path(x.reshape(1, -1))
-    node_indices = node_indicator.indices
+    node_indices = _path_nodes(tree, x)
     
     # Default feature names
     n_features = tree_.n_features
@@ -281,8 +303,7 @@ def get_feature_importance_path(
     tree_ = tree.tree_
     
     # Get the path through the tree
-    node_indicator = tree.decision_path(x.reshape(1, -1))
-    node_indices = node_indicator.indices
+    node_indices = _path_nodes(tree, x)
     
     importance = {}
     
