@@ -8,12 +8,20 @@ This module provides functions to:
 """
 
 import numpy as np
+from dataclasses import replace
 from typing import List, Tuple, Optional, Dict, Any
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
 
 from .explanation import Condition, Rule
+
+
+def _matches_missing(tree_, node_id: int, went_left: bool) -> bool:
+    """Whether the tree sends a missing value to this branch of the split."""
+    if not hasattr(tree_, 'missing_go_to_left'):  # scikit-learn before 1.3
+        return False
+    return bool(tree_.missing_go_to_left[node_id]) == went_left
 
 
 def get_decision_path(
@@ -63,12 +71,14 @@ def get_decision_path(
             operator = '>'
         
         condition = Condition(
-            feature_index=feature_idx,
+            feature_index=int(feature_idx),
             feature_name=feature_names[feature_idx],
             operator=operator,
-            threshold=threshold,
+            threshold=float(threshold),
             is_categorical=False,
-            float32_input=True
+            float32_input=True,
+            matches_missing=_matches_missing(tree_, node_id, operator == '<='),
+            missing_in_instance=bool(np.isnan(float(x[feature_idx])))
         )
         conditions.append(condition)
     
@@ -120,7 +130,10 @@ def get_leaf_paths(
         threshold = float(tree_.threshold[node])
         name = feature_names[feature]
         for child, operator in ((left, '<='), (right, '>')):
-            literal = Condition(feature, name, operator, threshold, float32_input=True)
+            literal = Condition(
+                feature, name, operator, threshold, float32_input=True,
+                matches_missing=_matches_missing(tree_, node, operator == '<=')
+            )
             stack.append((child, path + [(int(node), literal)]))
     return paths
 
@@ -130,7 +143,8 @@ def representative_instance(tree, path: List[Tuple[int, Condition]]) -> np.ndarr
     Build an instance that reaches the leaf at the end of a path.
     
     Values are float32-representable, so the split tests see them unchanged.
-    Features not on the path are set to 0.
+    A feature gets NaN when only a missing value satisfies its literals, which
+    happens in trees trained on missing data. Features not on the path are set to 0.
     
     Args:
         tree: A fitted sklearn decision tree
@@ -150,15 +164,19 @@ def representative_instance(tree, path: List[Tuple[int, Condition]]) -> np.ndarr
     
     x = np.zeros(tree.tree_.n_features, dtype=np.float64)
     for j in set(lows) | set(highs):
-        if j in highs:
-            value = np.float32(highs[j])
-            if float(value) > highs[j]:
+        low, high = lows.get(j, -np.inf), highs.get(j, np.inf)
+        if np.isfinite(high):
+            value = np.float32(high)
+            if float(value) > high:
                 value = np.nextafter(value, np.float32(-np.inf))
-        else:
-            value = np.float32(lows[j])
-            if float(value) <= lows[j]:
+        elif np.isfinite(low):
+            value = np.float32(low)
+            if float(value) <= low:
                 value = np.nextafter(value, np.float32(np.inf))
-        x[j] = float(value)
+        else:
+            value = np.float32(0.0)
+        fits = low < float(value) <= high and np.isfinite(value)
+        x[j] = float(value) if fits else np.nan
     return x
 
 
@@ -304,63 +322,35 @@ def simplify_conditions(conditions: List[Condition]) -> List[Condition]:
     - "x > 5" AND "x > 3" → "x > 5"
     - "x <= 10" AND "x <= 8" → "x <= 8"
     
+    A merged condition matches a missing value only if all its sources do, so the
+    conjunction selects the same rows as before.
+    
     Args:
         conditions: List of conditions to simplify
         
     Returns:
         Simplified list of conditions
     """
-    # Group conditions by feature
-    feature_conditions: Dict[int, List[Condition]] = {}
+    # Rounding to float32 changes what a threshold selects, so only like merges with like
+    groups: Dict[Tuple[int, bool], List[Condition]] = {}
     for cond in conditions:
-        if cond.feature_index not in feature_conditions:
-            feature_conditions[cond.feature_index] = []
-        feature_conditions[cond.feature_index].append(cond)
+        groups.setdefault((cond.feature_index, cond.float32_input), []).append(cond)
+    
+    def tightest(sources: List[Condition], key) -> Condition:
+        best = min(sources, key=key)
+        missing = all(c.matches_missing for c in sources)
+        return best if missing == best.matches_missing else replace(best, matches_missing=missing)
     
     simplified = []
-    
-    for feature_idx, conds in feature_conditions.items():
-        # Find the tightest bounds
-        lower_bounds = [c for c in conds if c.operator in ['>', '>=']]
-        upper_bounds = [c for c in conds if c.operator in ['<', '<=']]
-        equality = [c for c in conds if c.operator in ['==', '!=']]
-        
-        # Keep tightest lower bound
+    for conds in groups.values():
+        lower_bounds = [c for c in conds if c.operator in ('>', '>=')]
+        upper_bounds = [c for c in conds if c.operator in ('<', '<=')]
+        # At the same threshold the strict bound selects fewer rows
         if lower_bounds:
-            if any(c.operator == '>' for c in lower_bounds):
-                # All '>' conditions, keep highest threshold
-                gt_conds = [c for c in lower_bounds if c.operator == '>']
-                if gt_conds:
-                    best = max(gt_conds, key=lambda c: c.threshold)
-                    simplified.append(best)
-                gte_conds = [c for c in lower_bounds if c.operator == '>=']
-                if gte_conds:
-                    best = max(gte_conds, key=lambda c: c.threshold)
-                    # Only add if not dominated by a '>' condition
-                    if not gt_conds or best.threshold > max(c.threshold for c in gt_conds):
-                        simplified.append(best)
-            else:
-                best = max(lower_bounds, key=lambda c: c.threshold)
-                simplified.append(best)
-        
-        # Keep tightest upper bound
+            simplified.append(tightest(lower_bounds, lambda c: (-c.threshold, c.operator != '>')))
         if upper_bounds:
-            if any(c.operator == '<' for c in upper_bounds):
-                lt_conds = [c for c in upper_bounds if c.operator == '<']
-                if lt_conds:
-                    best = min(lt_conds, key=lambda c: c.threshold)
-                    simplified.append(best)
-                lte_conds = [c for c in upper_bounds if c.operator == '<=']
-                if lte_conds:
-                    best = min(lte_conds, key=lambda c: c.threshold)
-                    if not lt_conds or best.threshold < min(c.threshold for c in lt_conds):
-                        simplified.append(best)
-            else:
-                best = min(upper_bounds, key=lambda c: c.threshold)
-                simplified.append(best)
-        
-        # Keep equality conditions as-is
-        simplified.extend(equality)
+            simplified.append(tightest(upper_bounds, lambda c: (c.threshold, c.operator != '<')))
+        simplified.extend(c for c in conds if c.operator not in ('>', '>=', '<', '<='))
     
     return simplified
 
@@ -416,11 +406,12 @@ def extract_rules_from_tree(
         
         # Left child (<=)
         left_condition = Condition(
-            feature_index=feature_idx,
+            feature_index=int(feature_idx),
             feature_name=feature_names[feature_idx],
             operator='<=',
-            threshold=threshold,
-            float32_input=True
+            threshold=float(threshold),
+            float32_input=True,
+            matches_missing=_matches_missing(tree_, node_id, True)
         )
         conditions.append(left_condition)
         recurse(tree_.children_left[node_id], conditions)
@@ -428,11 +419,12 @@ def extract_rules_from_tree(
         
         # Right child (>)
         right_condition = Condition(
-            feature_index=feature_idx,
+            feature_index=int(feature_idx),
             feature_name=feature_names[feature_idx],
             operator='>',
-            threshold=threshold,
-            float32_input=True
+            threshold=float(threshold),
+            float32_input=True,
+            matches_missing=_matches_missing(tree_, node_id, False)
         )
         conditions.append(right_condition)
         recurse(tree_.children_right[node_id], conditions)

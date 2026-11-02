@@ -100,3 +100,9 @@ docs/*.csv
 experiments/results/
 *.log
 
+
+# Prepared experiment data
+experiments/.cache/
+
+# Solver scratch files written by PyXAI
+tmp/

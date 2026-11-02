@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.3.1 — 2026-11-02
+
+Rules differ from 1.3.0 only where the full path has no background rows: 0 of 6168 explanations per method otherwise (`experiments/results_release/`).
+
+### Fixed
+- **Missing values.** On a tree trained with NaN, a rule could be false on its own row. `Condition.matches_missing` now follows the tree's routing, so a path rule selects exactly the rows of its leaf, NaN included. This holds for `GPEExplainer` and its variants, `CertifiedGPE`, which now accepts instances with missing values, `compile_explanations`, including leaves reached only by NaN, and `GPEEnsemble`.
+- **Precision without evidence.** A rule with no background rows reported precision 1.0. It now reports NaN and `metadata['n_background'] == 0`, and NaN fails every threshold, so pruning never accepts such a rule. Previously pruning could pass through empty regions, which is the source of all rule changes above. Without any background data, precision and coverage are NaN. `precision_score` follows, and `aggregate_metrics` and `compare_explanations` skip undefined values and report how many remained.
+- `Explanation.to_dict()` passes strict JSON (`json.dumps(..., allow_nan=False)`) for all methods and round-trips through `from_dict`. NaN becomes null, an infinity becomes the string `Infinity`.
+- `str(rule)` called the purity of the leaf "confidence", which read as the precision of the rule. It now says "leaf purity". `GPEOptimal` no longer stores precision in that field. `to_natural_language()` no longer calls agreement with the model "accuracy".
+- `GPECounterfactual` could return a point with the same class. It now finds the closest point of another class exactly, by moving x into the box of each leaf, checks the result against the model, and sets `found=False` when no point is reachable. `actionable_features=[]` was treated as all features.
+- `GPEMultiResolution` and `GPEPareto` overwrote `min_precision` of the explainer. `GPEMultiResolution` silently replaced thresholds of the wrong length; it now raises `ValueError`.
+- `GPEStable` used the global NumPy random state. It takes `random_state`, and results repeat.
+- `GPEMonotonic` ignored the predicted class: "higher value, higher class" also argues for the lower class with a low value. It now swaps the direction for the lower class of a binary model.
+- GPE-IT no longer warns on empty subsets.
+- `simplify_conditions` on hand-made conditions: it dropped `in` conditions, ignored the missing-value flag when merging `>` with `>=` or `<` with `<=`, and merged conditions with different `float32_input`, all of which changed the selected rows. Paths read from a tree have none of these, and their rules are unchanged.
+
+### Changed
+- `GPEExplainer` and all variants reject regression trees, multi-output trees and unfitted models with a clear error. Regression trees never pruned, because precision compares classes.
+- `GPEEnsemble` accepts only `RandomForestClassifier` and `GradientBoostingClassifier`. XGBoost models returned empty rules, and regressors could not prune.
+- `min_precision` must be in (0, 1], and `feature_names` must match the model. Default names come from `feature_names_in_` if present.
+- Background data, calibration data and batches may be DataFrames; an empty or misshapen matrix raises a clear `ValueError`.
+- `metadata['meets_threshold']` on `GPEExplainer` and its variants, because some of them can miss `min_precision`.
+- Removed claims of priority and of "formal stability guarantees" from docstrings: stability is an empirical estimate.
+
+### Baselines
+Published comparisons with these wrappers should be read with the notes below.
+- `SHAPWrapper` flattened the 3D output of current `shap`, which mixed the values of features and classes. It now takes one value per feature for the predicted class and stores `metadata['top_features']`. Its rule is a conversion with an arbitrary margin and does not measure SHAP.
+- `LIMEWrapper` kept one edge of the bin of x, which widened the rule and lowered its precision, and it lost features whose names contain spaces or hyphens. It now uses the indices and exact edges of the explainer. The number of features in a LIME rule is the `n_features` setting, not a result of the method.
+- `AnchorsWrapper` lost conditions on such names and used bounds rounded to two decimals. It now uses `features()` and snaps bounds to the quartile edges. Its `precision` and `coverage` are those Anchors reports on its perturbation distribution; comparisons must recompute them on data.
+
+### Tests
+- New `tests/test_robustness.py`, `tests/test_baselines.py`, `tests/test_tree_utils.py`. All variants, the visualization module and the baseline wrappers now run in the test suite.
+
 ## 1.3.0 — 2026-11-02
 
 ### Added

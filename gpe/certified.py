@@ -34,7 +34,7 @@ from typing import Callable, List, Optional
 import numpy as np
 from scipy.stats import beta, norm
 
-from .core import GPEExplainer
+from .core import GPEExplainer, as_instance, as_matrix
 from .explanation import Certificate, Condition, Explanation, Rule
 from .tree_utils import literal_importance
 
@@ -205,13 +205,7 @@ class CertifiedGPE(GPEExplainer):
         if min_lift is not None and not 0 < lift_budget < 1:
             raise ValueError("lift_budget must be in (0, 1)")
 
-        X_cal = np.asarray(X_cal)
-        if X_cal.ndim != 2 or X_cal.shape[0] == 0:
-            raise ValueError("X_cal must be a non-empty 2D array")
-        if X_cal.shape[1] != model.n_features_in_:
-            raise ValueError(
-                f"X_cal has {X_cal.shape[1]} features, the model expects {model.n_features_in_}"
-            )
+        X_cal = as_matrix(X_cal, model, 'X_cal')
 
         self.X_cal = X_cal
         self.delta = delta
@@ -228,6 +222,7 @@ class CertifiedGPE(GPEExplainer):
 
         self.n_fit_overlap = 0
         if X_fit is not None:
+            X_fit = as_matrix(X_fit, model, 'X_fit')
             fit_rows = {row.tobytes() for row in np.asarray(X_fit, dtype=np.float32)}
             self.n_fit_overlap = sum(row.tobytes() in fit_rows for row in self._cal32)
             if self.n_fit_overlap:
@@ -242,6 +237,8 @@ class CertifiedGPE(GPEExplainer):
 
         Args:
             x: Feature vector to explain (1D array). Must not be a calibration row.
+               Missing values are allowed: rule regions contain the rows that the
+               tree routes the same way, NaN included.
             X_background: Must be None: the certificate is tied to X_cal.
 
         Returns:
@@ -249,16 +246,16 @@ class CertifiedGPE(GPEExplainer):
         """
         if X_background is not None:
             raise ValueError("CertifiedGPE evaluates rules on X_cal; X_background is not accepted")
-        x = np.asarray(x, dtype=float).flatten()
-        if np.isnan(x).any():
-            raise ValueError("CertifiedGPE cannot explain an instance with missing values")
+        x = as_instance(x, self.model)
 
         start_time = time.time()
         explanation = self._explain_leaf(x)
 
         full_mask = explanation.original_rule.evaluate_batch(self.X_cal)
         x32 = x.astype(np.float32)
-        in_cal = bool((self._cal32[full_mask] == x32).all(axis=1).any())
+        rows = self._cal32[full_mask]
+        same = (rows == x32) | (np.isnan(rows) & np.isnan(x32))
+        in_cal = bool(same.all(axis=1).any())
         explanation.metadata['x_in_calibration'] = in_cal
         if in_cal:
             warnings.warn(
@@ -357,7 +354,7 @@ class CertifiedGPE(GPEExplainer):
             lift_lower_bound=None if upper is None else float(bound) - upper,
             meets_lift=None if upper is None else bool(float(bound) - upper >= self.min_lift),
         )
-        precision = K / n if n else 1.0
+        precision = K / n if n else float('nan')
         return Explanation(
             instance=x,
             rule=rule,

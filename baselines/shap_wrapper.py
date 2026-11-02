@@ -121,28 +121,30 @@ class SHAPWrapper:
         # Get SHAP values
         shap_values = self.explainer.shap_values(x.reshape(1, -1))
         
-        # Handle different SHAP output formats
+        # One value per feature, for the predicted class. shap returns a list of
+        # per-class arrays or an array of shape (rows, features[, classes]).
+        prediction = self.model.predict(x.reshape(1, -1))[0]
+        class_index = 0
+        if hasattr(self.model, 'classes_'):
+            class_index = int(np.flatnonzero(self.model.classes_ == prediction)[0])
         if isinstance(shap_values, list):
-            # Multi-class classification
-            prediction = self.model.predict(x.reshape(1, -1))[0]
-            if hasattr(self.model, 'classes_'):
-                pred_idx = np.where(self.model.classes_ == prediction)[0][0]
-            else:
-                pred_idx = int(prediction)
-            shap_values = shap_values[pred_idx].flatten()
+            shap_values = np.asarray(shap_values[class_index])[0]
         else:
-            shap_values = shap_values.flatten()
-            prediction = self.model.predict(x.reshape(1, -1))[0]
+            shap_values = np.asarray(shap_values)[0]
+            if shap_values.ndim == 2:
+                shap_values = shap_values[:, class_index]
         
-        # Convert SHAP values to conditions
+        # SHAP gives attributions, not rules. To compare them with rule methods we
+        # build conditions around x with an arbitrary margin of 10% of the range, so
+        # the numbers of this rule measure this conversion and not SHAP itself. For
+        # attributions as such use metadata['top_features'].
         # Select top n_features by absolute SHAP value
         n_features = min(self.n_features, len(x), len(shap_values))
         top_indices = np.argsort(np.abs(shap_values))[-n_features:][::-1]
         
         conditions = []
+        top_indices = [int(idx) for idx in top_indices]
         for idx in top_indices:
-            if idx >= len(x):  # Skip if index out of bounds
-                continue
             if np.abs(shap_values[idx]) < 1e-6:
                 continue
             
@@ -190,6 +192,7 @@ class SHAPWrapper:
             computation_time=computation_time,
             metadata={
                 'shap_values': shap_values.tolist(),
+                'top_features': top_indices,
                 'explainer_type': self.explainer_type,
                 'n_features': self.n_features
             }
@@ -204,7 +207,7 @@ class SHAPWrapper:
         mask = rule.evaluate_batch(self.X_train)
         
         if mask.sum() == 0:
-            return 1.0, 0.0
+            return float('nan'), 0.0
         
         coverage = mask.mean()
         

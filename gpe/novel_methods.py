@@ -20,8 +20,8 @@ import time
 from scipy import stats
 
 from .explanation import Condition, Rule, Explanation
-from .tree_utils import get_decision_path, simplify_conditions, is_single_tree
-from .core import GPEExplainer
+from .tree_utils import get_decision_path, get_leaf_paths, simplify_conditions, is_single_tree
+from .core import GPEExplainer, as_instance, as_matrix, check_min_precision
 
 
 # =============================================================================
@@ -87,6 +87,9 @@ class GPEInformationTheoretic(GPEExplainer):
         
         I(C; Y) = H(Y) - H(Y|C)
         """
+        if len(y) == 0:
+            return 0.0
+        
         # H(Y) - entropy of predictions
         h_y = self._calculate_entropy(y)
         
@@ -151,7 +154,10 @@ class GPEInformationTheoretic(GPEExplainer):
         exp = super().explain(x, X_background)
         
         # Add MI scores to metadata
+        if X_background is None:
+            X_background = self.X_train
         if X_background is not None:
+            X_background = as_matrix(X_background, self.model, 'X_background')
             y_pred = self.model.predict(X_background)
             mi_scores = {}
             for cond in exp.rule.conditions:
@@ -180,9 +186,13 @@ class CounterfactualExplanation:
     counterfactual: np.ndarray
     counterfactual_prediction: Any
     changes: Dict[str, Tuple[float, float]]  # feature -> (original, new)
-    distance: float  # L1 or L2 distance
+    distance: float  # L1 distance in the original feature units
+    found: bool = True  # False: no reachable leaf of another class; x is returned unchanged
     
     def __str__(self) -> str:
+        if not self.found:
+            return (f"GPE-CF: no counterfactual within the allowed features and ranges\n"
+                    f"WHY this prediction: {self.explanation.rule}")
         lines = [
             "=" * 60,
             "GPE-CF: Counterfactual-Integrated Explanation",
@@ -218,10 +228,12 @@ class GPECounterfactual(GPEExplainer):
     - "You were rejected because income < 50000"
     - "If your income were 52000, you would be approved"
     
-    The counterfactual is found by:
-    1. Identifying the conditions that led to the prediction
-    2. Finding the minimal changes to violate those conditions
-    3. Verifying the prediction changes
+    A tree partitions the input space into boxes, one per leaf, so the closest
+    point of another class is found exactly: for every leaf of another class,
+    move x into the box by the smallest change, and keep the cheapest move. The
+    cost is the L1 distance with each feature scaled by its range, when the range
+    is known. The result is checked against the model. The search does not model
+    causality or feature dependence, so the point may be unrealistic.
     
     Parameters:
         model: Fitted decision tree
@@ -231,9 +243,6 @@ class GPECounterfactual(GPEExplainer):
         actionable_features: Features that can be changed (optional)
         feature_ranges: Valid ranges for features (optional)
     
-    Scientific Contribution:
-        Integration of rule-based explanations with counterfactuals
-        in a unified framework for decision trees.
     """
     
     def __init__(
@@ -246,17 +255,78 @@ class GPECounterfactual(GPEExplainer):
         feature_ranges: Optional[Dict[str, Tuple[float, float]]] = None
     ):
         super().__init__(model, feature_names, X_train, min_precision)
-        self.actionable_features = actionable_features or self.feature_names
+        self.actionable_features = self.feature_names if actionable_features is None else actionable_features
         self.feature_ranges = feature_ranges or {}
         
         # Compute feature ranges from training data
-        if X_train is not None:
+        if self.X_train is not None:
             for i, name in enumerate(self.feature_names):
                 if name not in self.feature_ranges:
-                    self.feature_ranges[name] = (
-                        X_train[:, i].min(),
-                        X_train[:, i].max()
-                    )
+                    column = self.X_train[:, i]
+                    if not np.isnan(column).all():
+                        self.feature_ranges[name] = (
+                            float(np.nanmin(column)),
+                            float(np.nanmax(column))
+                        )
+    
+    def _move_into_box(
+        self,
+        x: np.ndarray,
+        path: List[Tuple[int, Condition]]
+    ) -> Optional[Tuple[np.ndarray, Dict[str, Tuple[float, float]], float]]:
+        """
+        Cheapest move of x into the box of a leaf.
+        
+        Returns:
+            (new point, changes, cost), or None when the box is out of reach:
+            it needs a change to a non-actionable feature or leaves a valid range
+        """
+        lows: Dict[int, float] = {}
+        highs: Dict[int, float] = {}
+        missing_ok: Dict[int, bool] = {}
+        for _, literal in path:
+            j = literal.feature_index
+            missing_ok[j] = missing_ok.get(j, True) and literal.matches_missing
+            if literal.operator == '>':
+                lows[j] = max(lows.get(j, -np.inf), literal.threshold)
+            else:
+                highs[j] = min(highs.get(j, np.inf), literal.threshold)
+        
+        x_cf = x.copy()
+        changes: Dict[str, Tuple[float, float]] = {}
+        cost = 0.0
+        for j in missing_ok:
+            name = self.feature_names[j]
+            value32 = float(np.float32(x[j]))
+            low, high = lows.get(j, -np.inf), highs.get(j, np.inf)
+            if np.isnan(x[j]) and missing_ok[j]:
+                continue
+            if low < value32 <= high:
+                continue
+            if name not in self.actionable_features:
+                return None
+            
+            # The point of the box closest to x, representable in float32
+            range_low, range_high = self.feature_ranges.get(name, (-np.inf, np.inf))
+            target = range_low if np.isnan(x[j]) and np.isfinite(range_low) else x[j]
+            if np.isnan(target) or target <= low:
+                new = np.float32(low)
+                if float(new) <= low:
+                    new = np.nextafter(new, np.float32(np.inf))
+            else:
+                new = np.float32(high)
+                if float(new) > high:
+                    new = np.nextafter(new, np.float32(-np.inf))
+            new = float(new)
+            if not (low < new <= high) or not np.isfinite(new) or not range_low <= new <= range_high:
+                return None
+            
+            scale = range_high - range_low
+            step = abs(new - x[j]) if not np.isnan(x[j]) else 1.0
+            cost += step / scale if np.isfinite(scale) and scale > 0 else step
+            x_cf[j] = new
+            changes[name] = (float(x[j]), new)
+        return x_cf, changes, cost
     
     def _find_counterfactual(
         self,
@@ -265,54 +335,24 @@ class GPECounterfactual(GPEExplainer):
         prediction: Any
     ) -> Tuple[np.ndarray, Dict[str, Tuple[float, float]]]:
         """
-        Find minimal counterfactual by violating rule conditions.
+        Find the closest point that the tree assigns to another class.
         
-        Strategy: For each condition, find the minimal change to violate it,
-        then verify the prediction changes.
+        Returns:
+            (counterfactual, changes); x and an empty dict when there is none
         """
-        x_cf = x.copy()
-        changes = {}
-        
-        # Get all possible predictions
-        if hasattr(self.model, 'classes_'):
-            other_classes = [c for c in self.model.classes_ if c != prediction]
-        else:
-            other_classes = [1 - prediction]  # Binary case
-        
-        # Try to change prediction by violating conditions
-        for cond in rule.conditions:
-            if cond.feature_name not in self.actionable_features:
+        tree_ = self.model.tree_
+        best = None
+        for leaf, path in get_leaf_paths(self.model, self.feature_names).items():
+            if self.model.classes_[int(np.argmax(tree_.value[leaf][0]))] == prediction:
                 continue
-            
-            idx = cond.feature_index
-            old_value = x[idx]
-            
-            # Find value that violates the condition
-            epsilon = 0.01 * (self.feature_ranges.get(cond.feature_name, (0, 1))[1] - 
-                             self.feature_ranges.get(cond.feature_name, (0, 1))[0])
-            epsilon = max(epsilon, 0.001)
-            
-            if cond.operator in ['<=', '<']:
-                # Need value > threshold
-                new_value = cond.threshold + epsilon
-            else:  # '>', '>='
-                # Need value <= threshold
-                new_value = cond.threshold - epsilon
-            
-            # Clip to valid range
-            if cond.feature_name in self.feature_ranges:
-                min_val, max_val = self.feature_ranges[cond.feature_name]
-                new_value = np.clip(new_value, min_val, max_val)
-            
-            x_cf[idx] = new_value
-            changes[cond.feature_name] = (old_value, new_value)
-            
-            # Check if prediction changed
-            new_pred = self.model.predict(x_cf.reshape(1, -1))[0]
-            if new_pred != prediction:
-                break
-        
-        return x_cf, changes
+            move = self._move_into_box(x, path)
+            if move is None:
+                continue
+            if best is None or move[2] < best[2]:
+                best = move
+        if best is None:
+            return x.copy(), {}
+        return best[0], best[1]
     
     def explain_with_counterfactual(
         self,
@@ -326,6 +366,7 @@ class GPECounterfactual(GPEExplainer):
         counterfactual that would change the prediction.
         """
         # Get base explanation
+        x = as_instance(x, self.model)
         explanation = self.explain(x, X_background)
         explanation.method = "GPE-CF"
         
@@ -335,16 +376,21 @@ class GPECounterfactual(GPEExplainer):
         )
         
         cf_prediction = self.model.predict(x_cf.reshape(1, -1))[0]
+        found = bool(changes)
+        if found and cf_prediction == explanation.prediction:
+            raise RuntimeError("The counterfactual did not change the prediction")
         
-        # Calculate distance
-        distance = np.linalg.norm(x - x_cf, ord=1)  # L1 distance
+        # Calculate distance over the changed features; a missing value has no distance
+        difference = x - x_cf
+        distance = float(np.abs(difference[~np.isnan(difference)]).sum())
         
         return CounterfactualExplanation(
             explanation=explanation,
             counterfactual=x_cf,
             counterfactual_prediction=cf_prediction,
             changes=changes,
-            distance=distance
+            distance=distance,
+            found=found
         )
 
 
@@ -375,10 +421,11 @@ class GPEStable(GPEExplainer):
         min_stability: Minimum stability threshold (default: 0.8)
         n_perturbations: Number of perturbations for stability (default: 10)
         perturbation_std: Standard deviation of perturbations (default: 0.01)
+        random_state: Seed; each stability estimate restarts from it, so results
+            repeat and candidate rules are compared on the same perturbations
     
-    Scientific Contribution:
-        First stability-aware explanation method for decision trees
-        with formal stability guarantees.
+    Stability here is an empirical estimate on sampled perturbations. It is not a
+    formal guarantee.
     """
     
     def __init__(
@@ -389,12 +436,14 @@ class GPEStable(GPEExplainer):
         min_precision: float = 0.95,
         min_stability: float = 0.8,
         n_perturbations: int = 10,
-        perturbation_std: float = 0.01
+        perturbation_std: float = 0.01,
+        random_state: Optional[int] = 0
     ):
         super().__init__(model, feature_names, X_train, min_precision)
         self.min_stability = min_stability
         self.n_perturbations = n_perturbations
         self.perturbation_std = perturbation_std
+        self.random_state = random_state
     
     def _jaccard_similarity(self, set1: set, set2: set) -> float:
         """Calculate Jaccard similarity between two sets."""
@@ -424,8 +473,9 @@ class GPEStable(GPEExplainer):
             return 1.0
         
         # Feature ranges for perturbation
-        feature_stds = X_background.std(axis=0)
-        feature_stds[feature_stds == 0] = 1
+        feature_stds = np.nanstd(X_background, axis=0)
+        feature_stds[(feature_stds == 0) | np.isnan(feature_stds)] = 1
+        rng = np.random.RandomState(self.random_state)
         
         original_features = set(c.feature_name for c in rule.conditions)
         similarities = []
@@ -440,7 +490,7 @@ class GPEStable(GPEExplainer):
         
         for _ in range(self.n_perturbations):
             # Generate perturbation
-            noise = np.random.randn(len(x)) * self.perturbation_std * feature_stds
+            noise = rng.standard_normal(len(x)) * self.perturbation_std * feature_stds
             x_perturbed = x + noise
             
             # Get explanation for perturbed instance using simple GPE
@@ -481,7 +531,7 @@ class GPEStable(GPEExplainer):
                 
                 # Check precision
                 precision = self._calculate_precision(test_rule, prediction, X_background)
-                if precision < self.min_precision:
+                if not precision >= self.min_precision:  # also skips NaN
                     continue
                 
                 # Check stability
@@ -509,6 +559,10 @@ class GPEStable(GPEExplainer):
         exp = super().explain(x, X_background)
         
         # Calculate and add stability to metadata
+        if X_background is None:
+            X_background = self.X_train
+        if X_background is not None:
+            X_background = as_matrix(X_background, self.model, 'X_background')
         stability = self._calculate_stability(x, exp.rule, X_background)
         exp.metadata['stability'] = stability
         exp.method = "GPE-Stable"
@@ -576,11 +630,8 @@ class GPEMultiResolution(GPEExplainer):
         feature_names: List of feature names
         X_train: Training data
         n_levels: Number of resolution levels (default: 3)
-        precision_thresholds: Precision threshold per level (default: [0.9, 0.95, 0.99])
-    
-    Scientific Contribution:
-        First multi-resolution explanation framework for decision trees
-        with precision-controlled granularity.
+        precision_thresholds: Precision threshold per level; its length must equal
+            n_levels (default: [0.85, 0.95, 0.99], or evenly spaced for other n_levels)
     """
     
     def __init__(
@@ -592,12 +643,20 @@ class GPEMultiResolution(GPEExplainer):
         precision_thresholds: Optional[List[float]] = None
     ):
         super().__init__(model, feature_names, X_train, min_precision=0.9)
+        if n_levels < 1:
+            raise ValueError("n_levels must be at least 1")
+        if precision_thresholds is None:
+            precision_thresholds = (
+                [0.85, 0.95, 0.99] if n_levels == 3 else np.linspace(0.85, 0.99, n_levels).tolist()
+            )
+        elif len(precision_thresholds) != n_levels:
+            raise ValueError(
+                f"precision_thresholds has {len(precision_thresholds)} values for {n_levels} levels"
+            )
+        for threshold in precision_thresholds:
+            check_min_precision(threshold)
         self.n_levels = n_levels
-        self.precision_thresholds = precision_thresholds or [0.85, 0.95, 0.99]
-        
-        # Ensure correct number of thresholds
-        if len(self.precision_thresholds) != n_levels:
-            self.precision_thresholds = np.linspace(0.85, 0.99, n_levels).tolist()
+        self.precision_thresholds = list(precision_thresholds)
     
     def explain_multi(
         self,
@@ -610,10 +669,12 @@ class GPEMultiResolution(GPEExplainer):
         Returns explanations at multiple precision thresholds,
         from simplest to most detailed.
         """
-        x = np.asarray(x).flatten()
+        x = as_instance(x, self.model)
         
         if X_background is None:
             X_background = self.X_train
+        else:
+            X_background = as_matrix(X_background, self.model, 'X_background')
         
         prediction = self.model.predict(x.reshape(1, -1))[0]
         
@@ -623,14 +684,12 @@ class GPEMultiResolution(GPEExplainer):
         levels = []
         
         for threshold in self.precision_thresholds:
-            self.min_precision = threshold
-            
             # Prune with this threshold
-            pruned_rule = self._prune_phase(x, deepcopy(original_rule), X_background)
+            pruned_rule = self._with_threshold(threshold, x, original_rule, X_background)
             
             # Calculate metrics
-            precision = self._calculate_precision(pruned_rule, prediction, X_background) if X_background is not None else 1.0
-            coverage = self._calculate_coverage(pruned_rule, X_background) if X_background is not None else 0.0
+            precision = self._calculate_precision(pruned_rule, prediction, X_background) if X_background is not None else float('nan')
+            coverage = self._calculate_coverage(pruned_rule, X_background) if X_background is not None else float('nan')
             
             exp = Explanation(
                 instance=x,
@@ -649,6 +708,15 @@ class GPEMultiResolution(GPEExplainer):
             instance=x,
             prediction=prediction
         )
+    
+    def _with_threshold(self, threshold, x, original_rule, X_background) -> Rule:
+        """Prune at another threshold, keeping min_precision of the explainer."""
+        saved = self.min_precision
+        self.min_precision = threshold
+        try:
+            return self._prune_phase(x, deepcopy(original_rule), X_background)
+        finally:
+            self.min_precision = saved
 
 
 # =============================================================================
@@ -745,9 +813,13 @@ class GPEPareto(GPEExplainer):
         candidates = []
         
         # Different precision thresholds
+        saved = self.min_precision
         for threshold in np.linspace(0.7, 0.99, self.n_candidates):
             self.min_precision = threshold
-            pruned_rule = self._prune_phase(x, deepcopy(original_rule), X_background)
+            try:
+                pruned_rule = self._prune_phase(x, deepcopy(original_rule), X_background)
+            finally:
+                self.min_precision = saved
             
             precision = self._calculate_precision(pruned_rule, prediction, X_background)
             coverage = self._calculate_coverage(pruned_rule, X_background)
@@ -758,6 +830,7 @@ class GPEPareto(GPEExplainer):
                 prediction=prediction,
                 precision=precision,
                 coverage=coverage,
+                original_rule=original_rule,
                 method="GPE-Pareto"
             )
             candidates.append(exp)
@@ -774,10 +847,14 @@ class GPEPareto(GPEExplainer):
         
         Returns explanations on the Pareto front, sorted by complexity.
         """
-        x = np.asarray(x).flatten()
+        x = as_instance(x, self.model)
         
         if X_background is None:
             X_background = self.X_train
+        else:
+            X_background = as_matrix(X_background, self.model, 'X_background')
+        if X_background is None:
+            raise ValueError("GPEPareto needs background data to compare candidates")
         
         # Get original rule
         original_rule = self._greedy_phase(x)
@@ -822,6 +899,8 @@ class GPEPareto(GPEExplainer):
         
         for p in pareto_front:
             exp = p.explanation
+            if exp.precision != exp.precision:
+                continue  # A rule with no background rows cannot be scored
             # Normalize and weight: precision (0.4), coverage (0.3), 1/complexity (0.3)
             score = (0.4 * exp.precision + 
                     0.3 * exp.coverage + 

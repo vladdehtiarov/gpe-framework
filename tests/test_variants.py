@@ -165,18 +165,18 @@ class TestGPEMonotonic:
             monotonic_constraints=constraints
         )
         
-        for x in X[:10]:
+        for x in X[:30]:
             explanation = explainer.explain(x)
+            # For the lower class the direction of the argument swaps
+            flip = -1 if explanation.prediction == model.classes_[0] else 1
             
             for cond in explanation.rule.conditions:
-                constraint = constraints.get(cond.feature_name, 0)
+                constraint = flip * constraints.get(cond.feature_name, 0)
                 
                 if constraint == +1:
-                    # Should only have '>' or '>=' conditions
                     assert cond.operator in ['>', '>='], \
                         f"Feature {cond.feature_name} with +1 constraint has {cond.operator}"
                 elif constraint == -1:
-                    # Should only have '<' or '<=' conditions
                     assert cond.operator in ['<', '<='], \
                         f"Feature {cond.feature_name} with -1 constraint has {cond.operator}"
     
@@ -190,10 +190,13 @@ class TestGPEMonotonic:
             X_train=X,
             monotonic_constraints={'a': +1}
         )
-        rule = Rule([Condition(0, 'a', '<=', 0.0)], prediction=0)
+        # '<=' goes against +1 for the higher class, and with it for the lower class
+        x_high = next(row for row in X if model.predict(row.reshape(1, -1))[0] == 1)
+        x_low = next(row for row in X if model.predict(row.reshape(1, -1))[0] == 0)
+        rule = Rule([Condition(0, 'a', '<=', 0.0)], prediction=None)
         
-        pruned = explainer._prune_phase(X[0], rule, X)
-        assert pruned.conditions == []
+        assert explainer._prune_phase(x_high, rule, X).conditions == []
+        assert len(explainer._prune_phase(x_low, rule, X).conditions) == 1
 
 
 class TestGPEEnsemble:

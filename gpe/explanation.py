@@ -11,6 +11,7 @@ Author: Vladyslav Dehtiarov
 
 from dataclasses import asdict, dataclass, field
 from typing import List, Optional, Dict, Any, Union
+import math
 import numpy as np
 
 
@@ -20,6 +21,41 @@ def _round_down_to_float32(value: float) -> np.float32:
     if float(rounded) > value:
         rounded = np.nextafter(rounded, np.float32(-np.inf))
     return rounded
+
+
+def _json_safe(value: Any) -> Any:
+    """
+    Convert a value to what strict JSON accepts.
+    
+    NumPy scalars and arrays become Python values, NaN becomes None and an
+    infinity becomes the string 'Infinity' or '-Infinity'.
+    """
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (set, frozenset)):
+        value = sorted(value, key=str)
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float):
+        if math.isnan(value):
+            return None
+        if math.isinf(value):
+            return 'Infinity' if value > 0 else '-Infinity'
+    return value
+
+
+def _float_from_json(value: Any) -> float:
+    """Inverse of _json_safe for a float."""
+    return float('nan') if value is None else float(value)
+
+
+def _percent(value: float, digits: int = 2) -> str:
+    """Format a share; NaN means it could not be measured."""
+    return "n/a" if value != value else f"{value:.{digits}%}"
 
 
 @dataclass
@@ -39,6 +75,11 @@ class Condition:
         float32_input: Compare the feature value after rounding it to float32.
             sklearn trees do this before every split test, so conditions taken
             from a tree need it to select exactly the rows the tree sends there.
+        matches_missing: A missing value (NaN) satisfies this condition. sklearn
+            trees route NaN down one branch of each split, so conditions taken
+            from a tree need it to select the same rows as the tree.
+        missing_in_instance: Display only: the explained instance reached this
+            condition with a missing value, so the text says so.
     """
     feature_index: int
     feature_name: str
@@ -46,6 +87,8 @@ class Condition:
     threshold: Union[float, int, str, List]
     is_categorical: bool = False
     float32_input: bool = False
+    matches_missing: bool = False
+    missing_in_instance: bool = field(default=False, compare=False)
     
     def __post_init__(self):
         """Validate the condition."""
@@ -64,6 +107,8 @@ class Condition:
             True if the condition is satisfied, False otherwise
         """
         value = x[self.feature_index]
+        if self.matches_missing and value != value:
+            return True
         threshold = self.threshold
         if self.float32_input:
             value = float(np.float32(value))
@@ -92,28 +137,33 @@ class Condition:
             if self.operator == 'in':
                 return f"{self.feature_name} in {self.threshold}"
             return f"{self.feature_name} {self.operator} '{self.threshold}'"
-        else:
-            if isinstance(self.threshold, float):
-                return f"{self.feature_name} {self.operator} {self.threshold:.3f}"
-            return f"{self.feature_name} {self.operator} {self.threshold}"
+        suffix = " (or missing)" if self.missing_in_instance else ""
+        if isinstance(self.threshold, float):
+            return f"{self.feature_name} {self.operator} {self.threshold:.3f}{suffix}"
+        return f"{self.feature_name} {self.operator} {self.threshold}{suffix}"
     
     def __repr__(self) -> str:
         return f"Condition({self.feature_name} {self.operator} {self.threshold})"
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        return _json_safe({
             'feature_index': self.feature_index,
             'feature_name': self.feature_name,
             'operator': self.operator,
             'threshold': self.threshold,
             'is_categorical': self.is_categorical,
-            'float32_input': self.float32_input
-        }
+            'float32_input': self.float32_input,
+            'matches_missing': self.matches_missing,
+            'missing_in_instance': self.missing_in_instance
+        })
     
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> 'Condition':
         """Create from dictionary."""
+        d = dict(d)
+        if not d.get('is_categorical') and d.get('threshold') in ('Infinity', '-Infinity'):
+            d['threshold'] = float(d['threshold'])
         return cls(**d)
 
 
@@ -128,7 +178,8 @@ class Rule:
     Attributes:
         conditions: List of conditions that make up the rule
         prediction: The predicted class when this rule is satisfied
-        confidence: Confidence/probability of the prediction
+        confidence: Purity of the leaf the rule came from, on the training data.
+            It is not the precision of the rule: see Explanation.precision.
     """
     conditions: List[Condition] = field(default_factory=list)
     prediction: Optional[Any] = None
@@ -198,6 +249,9 @@ class Rule:
             else:
                 raise ValueError(f"Unknown operator: {cond.operator}")
             
+            if cond.matches_missing:
+                mask = mask | np.isnan(X[:, cond.feature_index])
+            
             result = result & mask
         
         return result
@@ -226,7 +280,7 @@ class Rule:
         if self.prediction is not None:
             rule_str += f" → {self.prediction}"
             if self.confidence is not None:
-                rule_str += f" (confidence: {self.confidence:.2%})"
+                rule_str += f" (leaf purity: {self.confidence:.2%})"
         return rule_str
     
     def __repr__(self) -> str:
@@ -236,8 +290,8 @@ class Rule:
         """Convert to dictionary for serialization."""
         return {
             'conditions': [c.to_dict() for c in self.conditions],
-            'prediction': self.prediction,
-            'confidence': self.confidence
+            'prediction': _json_safe(self.prediction),
+            'confidence': _json_safe(self.confidence)
         }
     
     @classmethod
@@ -296,7 +350,7 @@ class Certificate:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return asdict(self)
+        return _json_safe(asdict(self))
     
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> 'Certificate':
@@ -315,8 +369,11 @@ class Explanation:
         instance: The instance being explained
         rule: The explanation rule
         prediction: Model's prediction for the instance
-        precision: Precision of the explanation
-        coverage: Coverage of the explanation
+        precision: Share of the background rows in the rule's region that the
+            model assigns to the predicted class. This is agreement with the model,
+            not correctness of the prediction. NaN when no rows fall in the region.
+        coverage: Share of the background rows in the rule's region; NaN without
+            background data
         original_rule: The full rule before pruning (for comparison)
         method: Name of the method used to generate the explanation
         computation_time: Time taken to generate the explanation (seconds)
@@ -361,8 +418,8 @@ class Explanation:
             f"Prediction: {self.prediction}",
             f"Rule: {self.rule}",
             "-" * 60,
-            f"Precision: {self.precision:.2%}",
-            f"Coverage: {self.coverage:.2%}",
+            f"Precision: {_percent(self.precision)}",
+            f"Coverage: {_percent(self.coverage)}",
             f"Complexity: {self.complexity} conditions",
         ]
         
@@ -382,15 +439,15 @@ class Explanation:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
-            'instance': self.instance.tolist() if isinstance(self.instance, np.ndarray) else self.instance,
+            'instance': _json_safe(self.instance),
             'rule': self.rule.to_dict(),
-            'prediction': self.prediction,
-            'precision': self.precision,
-            'coverage': self.coverage,
+            'prediction': _json_safe(self.prediction),
+            'precision': _json_safe(self.precision),
+            'coverage': _json_safe(self.coverage),
             'original_rule': self.original_rule.to_dict() if self.original_rule else None,
             'method': self.method,
-            'computation_time': self.computation_time,
-            'metadata': self.metadata,
+            'computation_time': _json_safe(self.computation_time),
+            'metadata': _json_safe(self.metadata),
             'certificate': self.certificate.to_dict() if self.certificate else None
         }
     
@@ -398,11 +455,11 @@ class Explanation:
     def from_dict(cls, d: Dict[str, Any]) -> 'Explanation':
         """Create from dictionary."""
         return cls(
-            instance=np.array(d['instance']),
+            instance=np.array([_float_from_json(v) for v in d['instance']], dtype=np.float64),
             rule=Rule.from_dict(d['rule']),
             prediction=d['prediction'],
-            precision=d.get('precision', 0.0),
-            coverage=d.get('coverage', 0.0),
+            precision=_float_from_json(d.get('precision', 0.0)),
+            coverage=_float_from_json(d.get('coverage', 0.0)),
             original_rule=Rule.from_dict(d['original_rule']) if d.get('original_rule') else None,
             method=d.get('method', 'GPE'),
             computation_time=d.get('computation_time', 0.0),
@@ -422,7 +479,9 @@ class Explanation:
         
         conditions_text = []
         for cond in self.rule.conditions:
-            if cond.operator == '<=':
+            if cond.missing_in_instance:
+                conditions_text.append(f"{cond.feature_name} is missing")
+            elif cond.operator == '<=':
                 conditions_text.append(f"{cond.feature_name} is at most {cond.threshold:.2f}")
             elif cond.operator == '<':
                 conditions_text.append(f"{cond.feature_name} is less than {cond.threshold:.2f}")
@@ -444,7 +503,9 @@ class Explanation:
         else:
             conditions_str = ", ".join(conditions_text[:-1]) + f", and {conditions_text[-1]}"
         
-        return (f"The model predicts '{self.prediction}' because {conditions_str}. "
-                f"This explanation covers {self.coverage:.1%} of similar cases "
-                f"with {self.precision:.1%} accuracy.")
+        text = f"The model predicts '{self.prediction}' because {conditions_str}."
+        if self.precision != self.precision:
+            return text + " No background rows satisfy this rule, so its precision is unknown."
+        return (f"{text} The rule holds for {self.coverage:.1%} of the background rows, "
+                f"and the model gives {self.precision:.1%} of them the same class.")
 

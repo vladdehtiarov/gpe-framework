@@ -16,6 +16,7 @@ from typing import List, Optional, Dict, Any, Tuple, Callable
 from copy import deepcopy
 from itertools import combinations
 from collections import defaultdict
+from sklearn.utils.validation import check_is_fitted
 
 from .explanation import Condition, Rule, Explanation
 from .tree_utils import (
@@ -24,7 +25,7 @@ from .tree_utils import (
     is_ensemble_tree,
     is_single_tree
 )
-from .core import GPEExplainer
+from .core import GPEExplainer, as_instance, as_matrix, check_feature_names, check_min_precision
 
 
 class GPEOptimal(GPEExplainer):
@@ -98,7 +99,7 @@ class GPEOptimal(GPEExplainer):
                 
                 if precision >= self.min_precision:
                     # Found minimal rule
-                    test_rule.confidence = precision
+                    test_rule.confidence = rule.confidence
                     return test_rule
         
         # If no subset meets threshold, return full rule
@@ -215,9 +216,13 @@ class GPEMonotonic(GPEExplainer):
         X_train: Training data
         min_precision: Minimum precision threshold
         monotonic_constraints: Dictionary mapping feature names to constraints
-                               +1 = increasing (higher value → higher prediction)
-                               -1 = decreasing (higher value → lower prediction)
+                               +1 = increasing (higher value → higher class)
+                               -1 = decreasing (higher value → lower class)
                                 0 = no constraint
+                               For a binary model, a condition is kept when it points
+                               towards the predicted class: for the lower class the
+                               directions swap. Dropping conditions can take the rule
+                               below min_precision, which metadata['meets_threshold'] shows.
     
     Example:
         >>> constraints = {'income': +1, 'debt': -1}
@@ -255,10 +260,14 @@ class GPEMonotonic(GPEExplainer):
         """
         prediction = self.model.predict(x.reshape(1, -1))[0]
         
+        # "Higher value, higher class" argues for the lower class with "value is low"
+        classes = self.model.classes_
+        flip = -1 if len(classes) == 2 and prediction == classes[0] else 1
+        
         # First, filter conditions that violate monotonic constraints
         valid_conditions = []
         for cond in rule.conditions:
-            constraint = self.monotonic_constraints.get(cond.feature_name, 0)
+            constraint = flip * self.monotonic_constraints.get(cond.feature_name, 0)
             
             if constraint == 0:
                 # No constraint, keep
@@ -303,7 +312,8 @@ class GPEEnsemble:
     Complexity: O(N_trees + N_conditions) per explanation.
 
     Parameters:
-        model: A fitted sklearn ensemble (RandomForest*, GradientBoosting*)
+        model: A fitted sklearn classifier: RandomForestClassifier or
+            GradientBoostingClassifier. Other ensembles are rejected.
         feature_names: Optional list of feature names
         X_train: Training data (default background, tree weights)
         min_precision: Precision threshold tau
@@ -331,18 +341,20 @@ class GPEEnsemble:
             raise ValueError(
                 f"aggregation must be one of {self.AGGREGATIONS}, got '{aggregation}'"
             )
-        if not is_ensemble_tree(model):
-            raise ValueError("GPEEnsemble requires an ensemble tree model")
+        from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+        if not isinstance(model, (RandomForestClassifier, GradientBoostingClassifier)):
+            raise ValueError(
+                "GPEEnsemble requires a fitted RandomForestClassifier or "
+                f"GradientBoostingClassifier, got {type(model).__name__}"
+            )
+        check_is_fitted(model, 'estimators_')
+        check_min_precision(min_precision)
 
         self.model = model
-        self.feature_names = feature_names
-        self.X_train = X_train
+        self.feature_names = check_feature_names(feature_names, model)
+        self.X_train = None if X_train is None else as_matrix(X_train, model, 'X_train')
         self.min_precision = min_precision
         self.aggregation = aggregation
-
-        if self.feature_names is None:
-            n_features = model.n_features_in_
-            self.feature_names = [f"feature_{i}" for i in range(n_features)]
 
         self._trees = self._extract_trees()
         self._tree_paths = self._precompute_paths()
@@ -351,24 +363,15 @@ class GPEEnsemble:
 
     def _extract_trees(self) -> List:
         """Extract individual trees from the ensemble."""
-        from sklearn.ensemble import (
-            RandomForestClassifier, RandomForestRegressor,
-            GradientBoostingClassifier, GradientBoostingRegressor
-        )
+        from sklearn.ensemble import RandomForestClassifier
 
-        if isinstance(self.model, (RandomForestClassifier, RandomForestRegressor)):
+        if isinstance(self.model, RandomForestClassifier):
             return self.model.estimators_
-        elif isinstance(self.model, (GradientBoostingClassifier, GradientBoostingRegressor)):
-            trees = []
-            for stage in self.model.estimators_:
-                for tree in stage:
-                    trees.append(tree)
-            return trees
-        else:
-            try:
-                return self.model.get_booster().get_dump()
-            except Exception:
-                raise ValueError(f"Unsupported ensemble model: {type(self.model)}")
+        trees = []
+        for stage in self.model.estimators_:
+            for tree in stage:
+                trees.append(tree)
+        return trees
 
     def _precompute_paths(self) -> List[Dict[int, List[Condition]]]:
         """Precompute leaf-to-conditions map for all trees."""
@@ -395,8 +398,8 @@ class GPEEnsemble:
                 continue
 
             # Internal
-            feature_idx = tree_.feature[node_id]
-            threshold = tree_.threshold[node_id]
+            feature_idx = int(tree_.feature[node_id])
+            threshold = float(tree_.threshold[node_id])
             feat_name = feature_names[feature_idx]
 
             # Right child (>)
@@ -465,10 +468,12 @@ class GPEEnsemble:
             Explanation object
         """
         start_time = time.time()
-        x = np.asarray(x).flatten()
+        x = as_instance(x, self.model)
 
         if X_background is None:
             X_background = self.X_train
+        else:
+            X_background = as_matrix(X_background, self.model, 'X_background')
 
         prediction = self.model.predict(x.reshape(1, -1))[0]
         class_idx = 0
@@ -508,22 +513,29 @@ class GPEEnsemble:
             # No feature reaches consensus: fall back to the most supported one
             pool = [max(support, key=support.get)]
 
+        # A condition covers missing values only for the feature x itself is missing
         candidates = []
         for j in sorted(pool, key=lambda f: -support[f]):
+            missing = bool(np.isnan(x[j]))
             if j in lows:
-                candidates.append(Condition(j, self.feature_names[j], '>', lows[j], float32_input=True))
+                candidates.append(Condition(
+                    j, self.feature_names[j], '>', lows[j], float32_input=True,
+                    matches_missing=missing, missing_in_instance=missing
+                ))
             if j in highs:
-                candidates.append(Condition(j, self.feature_names[j], '<=', highs[j], float32_input=True))
+                candidates.append(Condition(
+                    j, self.feature_names[j], '<=', highs[j], float32_input=True,
+                    matches_missing=missing, missing_in_instance=missing
+                ))
 
         # Phase 3: Consensus Pruning
         if X_background is not None:
-            X_background = np.asarray(X_background)
             bg_pred = self._background_predictions(X_background)
 
             def metrics(conds):
                 mask = Rule(conds, prediction).evaluate_batch(X_background)
                 if mask.sum() == 0:
-                    return 1.0, 0.0  # same convention as GPEExplainer
+                    return float('nan'), 0.0  # same convention as GPEExplainer
                 return (bg_pred[mask] == prediction).mean(), mask.mean()
 
             conditions = list(candidates)
@@ -541,7 +553,7 @@ class GPEEnsemble:
                 precision, coverage = best[1], best[2]
         else:
             conditions = list(candidates)
-            precision, coverage = 1.0, 0.0
+            precision, coverage = float('nan'), float('nan')
 
         rule = Rule(conditions, prediction)
 
@@ -564,4 +576,7 @@ class GPEEnsemble:
         )
 
     def explain_batch(self, X, X_background=None):
+        X = as_matrix(X, self.model, 'X')
+        if X_background is not None:
+            X_background = as_matrix(X_background, self.model, 'X_background')
         return [self.explain(x, X_background) for x in X]

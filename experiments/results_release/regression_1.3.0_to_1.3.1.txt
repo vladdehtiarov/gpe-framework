@@ -1,0 +1,6 @@
+1.3.0 -> 1.3.1
+core {'n': 6168, 'rule_differs': 47, 'rule_differs_with_evidence': 10, 'rule_differs_full_path_has_rows': 0, 'precision_differs': 8, 'vacuous_old': 38}
+it {'n': 6168, 'rule_differs': 0, 'rule_differs_with_evidence': 0, 'rule_differs_full_path_has_rows': 0, 'precision_differs': 0, 'vacuous_old': 86}
+optimal {'n': 6168, 'rule_differs': 18, 'rule_differs_with_evidence': 0, 'rule_differs_full_path_has_rows': 0, 'precision_differs': 0, 'vacuous_old': 19}
+weighted {'n': 6168, 'rule_differs': 47, 'rule_differs_with_evidence': 10, 'rule_differs_full_path_has_rows': 0, 'precision_differs': 8, 'vacuous_old': 38}
+certified {'n': 6168, 'rule_differs': 0, 'rule_differs_with_evidence': 0, 'rule_differs_full_path_has_rows': 0, 'precision_differs': 0, 'vacuous_old': 119}

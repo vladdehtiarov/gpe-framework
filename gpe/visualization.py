@@ -460,7 +460,8 @@ def plot_metrics_summary(
     fig, axes = plt.subplots(1, 4, figsize=figsize)
     
     # Precision
-    precisions = [e.precision for e in explanations]
+    # Rules with no background rows have no precision to plot
+    precisions = [e.precision for e in explanations if e.precision == e.precision]
     axes[0].hist(precisions, bins=20, color='#3498db', alpha=0.7, edgecolor='black')
     axes[0].axvline(np.mean(precisions), color='red', linestyle='--', 
                     label=f'Mean: {np.mean(precisions):.2f}')

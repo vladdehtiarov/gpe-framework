@@ -7,6 +7,7 @@ the GPE Explanation format.
 Author: Vladyslav Dehtiarov
 """
 
+import re
 import numpy as np
 import time
 from typing import List, Optional, Dict, Any
@@ -14,6 +15,22 @@ from typing import List, Optional, Dict, Any
 import sys
 sys.path.insert(0, '..')
 from gpe.explanation import Condition, Rule, Explanation
+
+
+_NUMBER = r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?"
+
+
+def _snap(printed: float, edges: np.ndarray, value: float, operator: str) -> float:
+    """Closest quartile edge to a rounded bound, among those keeping x in the region."""
+    if edges.size == 0:
+        return printed
+    if operator in ('>', '>='):
+        fitting = edges[edges < value]
+    else:
+        fitting = edges[edges >= value]
+    if fitting.size == 0:
+        return printed
+    return float(fitting[np.argmin(np.abs(fitting - printed))])
 
 
 class AnchorsWrapper:
@@ -67,7 +84,7 @@ class AnchorsWrapper:
             )
         
         self.explainer = anchor_tabular.AnchorTabularExplainer(
-            class_names=['0', '1'],  # Will be updated based on model
+            class_names=[str(c) for c in getattr(self.model, 'classes_', ['0', '1'])],
             feature_names=self.feature_names,
             train_data=self.X_train,
             categorical_names=self.categorical_names
@@ -114,9 +131,10 @@ class AnchorsWrapper:
         
         computation_time = time.time() - start_time
         
-        # Get metrics from Anchors
-        precision = anchor_exp.precision() if hasattr(anchor_exp, 'precision') else 1.0
-        coverage = anchor_exp.coverage() if hasattr(anchor_exp, 'coverage') else 0.0
+        # Metrics as Anchors reports them, on its own perturbation distribution.
+        # Comparisons must recompute them on data: see anchor issue #82.
+        precision = anchor_exp.precision() if hasattr(anchor_exp, 'precision') else float('nan')
+        coverage = anchor_exp.coverage() if hasattr(anchor_exp, 'coverage') else float('nan')
         
         return Explanation(
             instance=x,
@@ -138,93 +156,34 @@ class AnchorsWrapper:
         x: np.ndarray
     ) -> List[Condition]:
         """
-        Parse Anchors explanation into Conditions.
+        Turn an anchor into conditions.
         
-        Anchors format examples:
-        - "feature_0 > 3.50"
-        - "feature_1 <= 2.00"
-        - "3.50 < feature_0 <= 5.00"
+        Feature indices come from anchor_exp.features(). Only the strings hold the
+        bounds, rounded to two decimals, so each bound is snapped to the quartile edge
+        of the discretizer it was printed from. The feature name is cut out of the
+        string first, so it may contain any characters.
         """
-        import re
-        
         conditions = []
-        
-        if not hasattr(anchor_exp, 'names'):
-            return conditions
-        
-        for rule_str in anchor_exp.names():
-            # Try different patterns
-            
-            # Pattern: "value < feature <= value"
-            match = re.match(r"([\d.-]+)\s*<\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*<=\s*([\d.-]+)", rule_str)
-            if match:
-                low = float(match.group(1))
-                feature_name = match.group(2)
-                high = float(match.group(3))
-                
-                try:
-                    idx = self.feature_names.index(feature_name)
-                except ValueError:
-                    continue
-                
-                # Add both bounds
+        for j, text in zip(anchor_exp.features(), anchor_exp.names()):
+            j = int(j)
+            name = self.feature_names[j]
+            before, _, after = text.partition(name)
+            if j in self.explainer.categorical_names and j not in self.explainer.ordinal_features:
                 conditions.append(Condition(
-                    feature_index=idx,
-                    feature_name=feature_name,
-                    operator='>',
-                    threshold=low
-                ))
-                conditions.append(Condition(
-                    feature_index=idx,
-                    feature_name=feature_name,
-                    operator='<=',
-                    threshold=high
+                    j, name, '==', float(x[j]), is_categorical=False
                 ))
                 continue
             
-            # Pattern: "feature <= value" or "feature > value"
-            match = re.match(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*(<=|<|>=|>|=)\s*([\d.-]+)", rule_str)
-            if match:
-                feature_name = match.group(1)
-                operator = match.group(2)
-                threshold = float(match.group(3))
-                
-                try:
-                    idx = self.feature_names.index(feature_name)
-                except ValueError:
-                    continue
-                
-                # Normalize operator
-                if operator == '=':
-                    operator = '=='
-                
+            edges = np.asarray(self.explainer.disc.mins[j][1:], dtype=float)
+            low = re.search(rf"({_NUMBER})\s*<\s*$", before)
+            if low:
+                conditions.append(Condition(j, name, '>', _snap(float(low.group(1)), edges, x[j], '>')))
+            high = re.search(rf"^\s*(<=|>|<|>=)\s*({_NUMBER})", after)
+            if high:
+                operator = high.group(1)
                 conditions.append(Condition(
-                    feature_index=idx,
-                    feature_name=feature_name,
-                    operator=operator,
-                    threshold=threshold
+                    j, name, operator, _snap(float(high.group(2)), edges, x[j], operator)
                 ))
-                continue
-            
-            # Categorical pattern: "feature = category_name"
-            match = re.match(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([a-zA-Z_][a-zA-Z0-9_]*)", rule_str)
-            if match:
-                feature_name = match.group(1)
-                category = match.group(2)
-                
-                try:
-                    idx = self.feature_names.index(feature_name)
-                except ValueError:
-                    continue
-                
-                conditions.append(Condition(
-                    feature_index=idx,
-                    feature_name=feature_name,
-                    operator='==',
-                    threshold=category,
-                    is_categorical=True
-                ))
-        
         return conditions
     
     def explain_batch(

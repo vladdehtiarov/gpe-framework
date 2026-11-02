@@ -123,16 +123,7 @@ class LIMEWrapper:
             prediction = self.model.predict(x.reshape(1, -1))[0]
         
         # Convert LIME explanation to GPE format
-        conditions = []
-        
-        for feature_weight in lime_exp.as_list():
-            # Parse LIME feature string (e.g., "3.50 < feature_0 <= 5.00")
-            feature_str = feature_weight[0]
-            weight = feature_weight[1]
-            
-            condition = self._parse_lime_condition(feature_str, x)
-            if condition is not None:
-                conditions.append(condition)
+        conditions = self._conditions_from_exp(lime_exp, x)
         
         # Create rule
         rule = Rule(
@@ -159,75 +150,33 @@ class LIMEWrapper:
             }
         )
     
-    def _parse_lime_condition(
-        self,
-        feature_str: str,
-        x: np.ndarray
-    ) -> Optional[Condition]:
+    def _conditions_from_exp(self, lime_exp, x: np.ndarray) -> List[Condition]:
         """
-        Parse a LIME feature string into a Condition.
+        Turn LIME's selected features into conditions.
         
-        LIME format examples:
-        - "feature_0 <= 3.50"
-        - "3.50 < feature_0 <= 5.00"
-        - "feature_1 > 2.00"
+        Indices and bin edges come from the explainer. The strings of as_list()
+        round the edges to two decimals and depend on feature names. A selected
+        feature gives both edges of the quartile bin of x, which is the region
+        LIME reports, so the rule is true on x. LIME selects n_features features
+        whatever the data, so the length of this rule is a setting, not a result.
         """
-        import re
-        
-        # Try to match patterns
-        # Pattern 1: "feature <= value" or "feature > value"
-        pattern1 = r"([a-zA-Z_][a-zA-Z0-9_]*)\s*(<=|<|>=|>)\s*([\d.-]+)"
-        # Pattern 2: "value < feature <= value"
-        pattern2 = r"([\d.-]+)\s*<\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*<=\s*([\d.-]+)"
-        
-        match2 = re.match(pattern2, feature_str)
-        if match2:
-            low = float(match2.group(1))
-            feature_name = match2.group(2)
-            high = float(match2.group(3))
-            
-            # Find feature index
-            try:
-                feature_idx = self.feature_names.index(feature_name)
-            except ValueError:
-                return None
-            
-            # Return the more restrictive condition based on instance value
-            value = x[feature_idx]
-            if abs(value - low) < abs(value - high):
-                return Condition(
-                    feature_index=feature_idx,
-                    feature_name=feature_name,
-                    operator='>',
-                    threshold=low
-                )
-            else:
-                return Condition(
-                    feature_index=feature_idx,
-                    feature_name=feature_name,
-                    operator='<=',
-                    threshold=high
-                )
-        
-        match1 = re.match(pattern1, feature_str)
-        if match1:
-            feature_name = match1.group(1)
-            operator = match1.group(2)
-            threshold = float(match1.group(3))
-            
-            try:
-                feature_idx = self.feature_names.index(feature_name)
-            except ValueError:
-                return None
-            
-            return Condition(
-                feature_index=feature_idx,
-                feature_name=feature_name,
-                operator=operator,
-                threshold=threshold
-            )
-        
-        return None
+        label = sorted(lime_exp.local_exp)[0] if self.mode == 'classification' else 0
+        selected = [int(j) for j, _ in lime_exp.local_exp[label]]
+        discretizer = self.explainer.discretizer
+        bins = discretizer.discretize(x.reshape(1, -1))[0]
+        conditions = []
+        for j in selected:
+            name = self.feature_names[j]
+            if j not in discretizer.to_discretize:
+                conditions.append(Condition(j, name, '==', float(x[j])))
+                continue
+            index = int(bins[j])
+            edges = discretizer.mins[j], discretizer.maxs[j]
+            if index > 0:
+                conditions.append(Condition(j, name, '>', float(edges[0][index])))
+            if index < len(edges[0]) - 1:
+                conditions.append(Condition(j, name, '<=', float(edges[1][index])))
+        return conditions
     
     def _estimate_metrics(
         self,
@@ -238,7 +187,7 @@ class LIMEWrapper:
         mask = rule.evaluate_batch(self.X_train)
         
         if mask.sum() == 0:
-            return 1.0, 0.0
+            return float('nan'), 0.0
         
         coverage = mask.mean()
         

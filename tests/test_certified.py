@@ -389,7 +389,8 @@ class TestDegenerate:
         )
         exp = CertifiedGPE(tree, rows).explain(x)
         assert exp.certificate.n == 0
-        assert exp.precision == 1.0 and exp.coverage == 0.0
+        assert np.isnan(exp.precision) and exp.coverage == 0.0
+        assert exp.certificate.lower_bound == 1.0  # region inside one leaf, whatever the data
         assert exp.complexity == len(simplify_conditions([c for _, c in paths[int(tree.apply(x.reshape(1, -1))[0])]]))
 
     def test_very_long_path_family_does_not_overflow(self, data):
@@ -429,12 +430,13 @@ class TestValidation:
         with pytest.raises(ValueError):
             CertifiedGPE(tree, X_cal).explain(X_te[0], X_tr)
 
-    def test_nan_instance_rejected(self, data):
+    def test_nan_instance_gets_a_rule_true_on_it(self, data):
         tree, _, X_cal, X_te = data
         x = X_te[0].copy()
         x[0] = np.nan
-        with pytest.raises(ValueError):
-            CertifiedGPE(tree, X_cal).explain(x)
+        exp = CertifiedGPE(tree, X_cal).explain(x)
+        assert exp.rule.evaluate(x)
+        assert exp.original_rule.evaluate_batch(x.reshape(1, -1))[0]
 
     def test_calibration_row_warns(self, data):
         tree, _, X_cal, X_te = data
@@ -592,7 +594,7 @@ class TestCompile:
             online, compiled = explainer.explain(x), table.explain(x)
             assert compiled.rule.conditions == online.rule.conditions
             assert compiled.prediction == online.prediction
-            assert compiled.precision == pytest.approx(online.precision)
+            assert compiled.precision == pytest.approx(online.precision, nan_ok=True)
             assert compiled.coverage == pytest.approx(online.coverage)
             assert compiled.certificate == online.certificate
             assert compiled.method.endswith("-compiled")

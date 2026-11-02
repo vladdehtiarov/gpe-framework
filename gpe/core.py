@@ -14,6 +14,7 @@ import numpy as np
 import time
 from typing import List, Optional, Tuple, Dict, Any, Callable
 from copy import deepcopy
+from sklearn.utils.validation import check_is_fitted
 
 from .explanation import Condition, Rule, Explanation
 from .tree_utils import (
@@ -24,6 +25,75 @@ from .tree_utils import (
 )
 
 
+def check_min_precision(min_precision: float) -> None:
+    """Raise if the precision threshold is not a number in (0, 1]."""
+    if not isinstance(min_precision, (int, float, np.number)) or not 0 < min_precision <= 1:
+        raise ValueError(f"min_precision must be in (0, 1], got {min_precision!r}")
+
+
+def check_feature_names(feature_names, model) -> List[str]:
+    """Return the feature names as a list, defaulting to the ones the model saw."""
+    if feature_names is None:
+        if hasattr(model, 'feature_names_in_'):
+            return [str(name) for name in model.feature_names_in_]
+        return [f"feature_{i}" for i in range(model.n_features_in_)]
+    feature_names = list(feature_names)
+    if len(feature_names) != model.n_features_in_:
+        raise ValueError(
+            f"feature_names has {len(feature_names)} names, "
+            f"the model expects {model.n_features_in_} features"
+        )
+    return feature_names
+
+
+def as_matrix(X, model, name: str = 'X') -> np.ndarray:
+    """
+    Check a data matrix against the model and return it as a numeric 2D array.
+    
+    A NumPy array comes back as the same object, so caching by identity keeps
+    working. A DataFrame must have the columns the model was fitted on, in order.
+    
+    Args:
+        X: Array-like or DataFrame
+        model: The fitted model
+        name: Name of the argument, for error messages
+        
+    Returns:
+        2D array with one column per model feature
+    """
+    if hasattr(X, 'iloc') and hasattr(X, 'columns'):
+        expected = getattr(model, 'feature_names_in_', None)
+        if expected is not None and list(X.columns) != list(expected):
+            raise ValueError(f"{name} columns differ from the features the model was fitted on")
+    if not isinstance(X, np.ndarray) or X.dtype == object:
+        try:
+            X = np.asarray(X, dtype=np.float64)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} must hold numbers only: {error}") from error
+    if X.ndim != 2:
+        raise ValueError(f"{name} must be 2D, got {X.ndim}D")
+    if X.shape[0] == 0:
+        raise ValueError(f"{name} is empty")
+    if X.shape[1] != model.n_features_in_:
+        raise ValueError(
+            f"{name} has {X.shape[1]} features, the model expects {model.n_features_in_}"
+        )
+    return X
+
+
+def as_instance(x, model) -> np.ndarray:
+    """Check one instance against the model and return it as a float 1D array."""
+    try:
+        x = np.asarray(x, dtype=np.float64).flatten()
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"The instance must hold numbers only: {error}") from error
+    if x.shape[0] != model.n_features_in_:
+        raise ValueError(
+            f"The instance has {x.shape[0]} features, the model expects {model.n_features_in_}"
+        )
+    return x
+
+
 class GPEExplainer:
     """
     Greedy-Prune-Explain Explainer for Decision Trees.
@@ -32,10 +102,12 @@ class GPEExplainer:
     predictions using the GPE algorithm.
     
     Parameters:
-        model: A fitted sklearn DecisionTreeClassifier or DecisionTreeRegressor
+        model: A fitted sklearn DecisionTreeClassifier. Regression trees are rejected:
+            precision compares predicted classes, which a regressor does not have.
         feature_names: Optional list of feature names
-        X_train: Training data for precision/coverage calculation (optional but recommended)
-        min_precision: Minimum precision threshold for pruning (default: 0.95)
+        X_train: Default background data for pruning and for precision/coverage.
+            Without background data nothing is pruned and both metrics are NaN.
+        min_precision: Minimum precision threshold for pruning, in (0, 1] (default: 0.95)
         simplify: Whether to simplify conditions by merging redundant ones (default: True)
     
     Example:
@@ -58,12 +130,6 @@ class GPEExplainer:
         min_precision: float = 0.95,
         simplify: bool = True
     ):
-        self.model = model
-        self.feature_names = feature_names
-        self.X_train = X_train
-        self.min_precision = min_precision
-        self.simplify = simplify
-        
         # Validate model
         if not is_single_tree(model):
             if is_ensemble_tree(model):
@@ -72,15 +138,25 @@ class GPEExplainer:
                     "For ensemble models, use GPEEnsemble instead."
                 )
             raise ValueError(
-                "GPEExplainer requires a fitted DecisionTreeClassifier or "
-                "DecisionTreeRegressor. For other models, consider using "
+                "GPEExplainer requires a fitted DecisionTreeClassifier. "
+                "For other models, consider using "
                 "model-agnostic methods like LIME or SHAP."
             )
+        if not hasattr(model, 'predict_proba'):
+            raise ValueError(
+                "GPEExplainer requires a DecisionTreeClassifier: precision compares "
+                "predicted classes, which a regression tree does not have."
+            )
+        check_is_fitted(model, 'tree_')
+        if model.n_outputs_ != 1:
+            raise ValueError("GPEExplainer requires a single-output classifier")
+        check_min_precision(min_precision)
         
-        # Set default feature names
-        if self.feature_names is None:
-            n_features = model.n_features_in_
-            self.feature_names = [f"feature_{i}" for i in range(n_features)]
+        self.model = model
+        self.feature_names = check_feature_names(feature_names, model)
+        self.X_train = None if X_train is None else as_matrix(X_train, model, 'X_train')
+        self.min_precision = min_precision
+        self.simplify = simplify
     
     def explain(
         self,
@@ -100,11 +176,13 @@ class GPEExplainer:
         """
         start_time = time.time()
         
-        x = np.asarray(x).flatten()
+        x = as_instance(x, self.model)
         
         # Use X_train if no background provided
         if X_background is None:
             X_background = self.X_train
+        else:
+            X_background = as_matrix(X_background, self.model, 'X_background')
         
         # Phase 1: GREEDY - Extract full decision path
         original_rule = self._greedy_phase(x)
@@ -223,13 +301,13 @@ class GPEExplainer:
         """
         prediction = self.model.predict(x.reshape(1, -1))[0]
         
-        # Calculate metrics
+        # Calculate metrics; without rows there is nothing to report
         if X_background is not None:
             precision = self._calculate_precision(pruned_rule, prediction, X_background)
             coverage = self._calculate_coverage(pruned_rule, X_background)
         else:
-            precision = pruned_rule.confidence if pruned_rule.confidence else 1.0
-            coverage = 0.0
+            precision = float('nan')
+            coverage = float('nan')
         
         computation_time = time.time() - start_time
         
@@ -245,11 +323,13 @@ class GPEExplainer:
             metadata={
                 'min_precision': self.min_precision,
                 'simplify': self.simplify,
-                # 0 means the reported precision of 1.0 rests on no rows
+                # Rows behind the reported precision; None without background data
                 'n_background': (
                     int(round(coverage * len(X_background)))
                     if X_background is not None else None
-                )
+                ),
+                # Variants can miss the threshold; NaN precision does not meet it
+                'meets_threshold': bool(precision >= self.min_precision)
             }
         )
     
@@ -273,22 +353,22 @@ class GPEExplainer:
             X: Background data
             
         Returns:
-            Precision value between 0 and 1
+            Precision value between 0 and 1. NaN when no row satisfies the rule:
+            NaN fails every comparison with the threshold, so a rule without
+            evidence is never accepted during pruning.
         """
         # Find instances that satisfy the rule
         mask = rule.evaluate_batch(X)
         
         if mask.sum() == 0:
-            return 1.0  # No instances satisfy the rule, perfect precision
+            return float('nan')
         
         # Get predictions for matching instances
         X_matching = X[mask]
         y_pred = self.model.predict(X_matching)
         
         # Calculate precision
-        precision = (y_pred == prediction).mean()
-        
-        return precision
+        return float((y_pred == prediction).mean())
     
     def _calculate_coverage(self, rule: Rule, X: np.ndarray) -> float:
         """
@@ -304,7 +384,7 @@ class GPEExplainer:
             Coverage value between 0 and 1
         """
         mask = rule.evaluate_batch(X)
-        return mask.mean()
+        return float(mask.mean())
     
     def explain_batch(
         self,
@@ -323,6 +403,10 @@ class GPEExplainer:
         Returns:
             List of Explanation objects
         """
+        X = as_matrix(X, self.model, 'X')
+        if X_background is not None:
+            X_background = as_matrix(X_background, self.model, 'X_background')
+        
         explanations = []
         n_samples = X.shape[0]
         

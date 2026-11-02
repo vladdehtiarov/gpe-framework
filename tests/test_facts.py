@@ -84,8 +84,9 @@ class TestFullPathPrecision:
         X = np.array([[0.0], [1.0]] * 20)
         tree = DecisionTreeClassifier(random_state=0).fit(X, [0, 1] * 20)
         explanation = GPEExplainer(tree).explain(np.array([0.0]), np.array([[1.0]] * 5))
-        assert explanation.precision == 1.0
+        assert np.isnan(explanation.precision)
         assert explanation.metadata['n_background'] == 0
+        assert explanation.metadata['meets_threshold'] is False
 
 
 class TestFloat32:

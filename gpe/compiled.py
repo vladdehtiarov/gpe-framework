@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from .certified import CertifiedGPE
-from .core import GPEExplainer
+from .core import GPEExplainer, as_instance, as_matrix
 from .explanation import Certificate, Condition, Explanation, Rule
 from .novel_methods import GPEInformationTheoretic
 from .tree_utils import get_leaf_paths, representative_instance, simplify_conditions
@@ -57,7 +57,7 @@ class CompiledExplanations:
     def explain(self, x: np.ndarray) -> Explanation:
         """Look up the explanation of an instance."""
         start_time = time.time()
-        x = np.asarray(x).flatten()
+        x = as_instance(x, self.model)
         entry = self.entries[int(self.model.apply(x.reshape(1, -1))[0])]
         return Explanation(
             instance=x,
@@ -74,7 +74,7 @@ class CompiledExplanations:
 
     def explain_batch(self, X: np.ndarray) -> List[Explanation]:
         """Look up explanations for multiple instances."""
-        return [self.explain(x) for x in np.asarray(X)]
+        return [self.explain(x) for x in as_matrix(X, self.model, 'X')]
 
     @property
     def n_unique_rules(self) -> int:

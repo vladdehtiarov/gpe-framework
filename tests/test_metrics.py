@@ -73,8 +73,8 @@ class TestPrecisionScore:
         
         precision = precision_score(explanation, model, X)
         
-        # Should be 1.0 when no instances match
-        assert precision == 1.0
+        # Undefined when no instances match
+        assert np.isnan(precision)
 
 
 class TestCoverageScore:

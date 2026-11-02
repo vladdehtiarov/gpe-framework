@@ -38,7 +38,7 @@ def precision_score(
         X: Background data
         
     Returns:
-        Precision score between 0 and 1
+        Precision score between 0 and 1, NaN when no row satisfies the rule
     """
     rule = explanation.rule
     prediction = explanation.prediction
@@ -47,7 +47,7 @@ def precision_score(
     mask = rule.evaluate_batch(X)
     
     if mask.sum() == 0:
-        return 1.0  # Perfect precision if no instances match
+        return float('nan')  # No rows to measure on
     
     # Get predictions for matching instances
     X_matching = X[mask]
@@ -140,8 +140,8 @@ def fidelity_score(
     
     # Get instance and feature ranges
     instance = explanation.instance
-    feature_mins = X.min(axis=0)
-    feature_maxs = X.max(axis=0)
+    feature_mins = np.nanmin(X, axis=0)
+    feature_maxs = np.nanmax(X, axis=0)
     feature_ranges = feature_maxs - feature_mins
     
     # Generate local samples
@@ -200,7 +200,7 @@ def stability_score(
     rng = np.random.RandomState(random_state)
     
     # Get feature ranges
-    feature_ranges = X.max(axis=0) - X.min(axis=0)
+    feature_ranges = np.nanmax(X, axis=0) - np.nanmin(X, axis=0)
     feature_ranges[feature_ranges == 0] = 1  # Avoid division by zero
     
     # Get original explanation
@@ -290,7 +290,8 @@ def compare_explanations(
     Compare two sets of explanations (e.g., from different methods).
     
     Performs statistical tests to determine if there are significant
-    differences in explanation quality.
+    differences in explanation quality. Instances where a metric is undefined
+    in either set (a rule with no background rows) are left out of its test.
     
     Args:
         explanations1: First set of explanations
@@ -318,8 +319,10 @@ def compare_explanations(
     comparison = {}
     
     for metric_name in metrics1.keys():
-        vals1 = metrics1[metric_name]
-        vals2 = metrics2[metric_name]
+        vals1 = np.asarray(metrics1[metric_name], dtype=float)
+        vals2 = np.asarray(metrics2[metric_name], dtype=float)
+        defined = ~(np.isnan(vals1) | np.isnan(vals2))
+        vals1, vals2 = vals1[defined], vals2[defined]
         
         # Paired t-test (assumes same instances)
         t_stat, p_value = stats.ttest_rel(vals1, vals2)
@@ -329,6 +332,7 @@ def compare_explanations(
         d = diff.mean() / diff.std() if diff.std() > 0 else 0
         
         comparison[metric_name] = {
+            'n_pairs': int(defined.sum()),
             'mean_1': np.mean(vals1),
             'std_1': np.std(vals1),
             'mean_2': np.mean(vals2),
@@ -356,7 +360,8 @@ def aggregate_metrics(
         X: Background data
         
     Returns:
-        Dictionary with mean, std, min, max for each metric
+        Dictionary with mean, std, min, max for each metric, over the
+        explanations where the metric is defined, and their count n
     """
     metrics = {
         'precision': [precision_score(e, model, X) for e in explanations],
@@ -368,12 +373,15 @@ def aggregate_metrics(
     aggregated = {}
     
     for metric_name, values in metrics.items():
+        values = np.asarray(values, dtype=float)
+        values = values[~np.isnan(values)]
         aggregated[metric_name] = {
-            'mean': np.mean(values),
-            'std': np.std(values),
-            'min': np.min(values),
-            'max': np.max(values),
-            'median': np.median(values)
+            'n': int(values.size),
+            'mean': float(np.mean(values)) if values.size else float('nan'),
+            'std': float(np.std(values)) if values.size else float('nan'),
+            'min': float(np.min(values)) if values.size else float('nan'),
+            'max': float(np.max(values)) if values.size else float('nan'),
+            'median': float(np.median(values)) if values.size else float('nan')
         }
     
     return aggregated

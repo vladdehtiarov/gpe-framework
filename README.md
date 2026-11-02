@@ -5,25 +5,17 @@
 [![PyPI version](https://badge.fury.io/py/gpe-framework.svg)](https://badge.fury.io/py/gpe-framework)
 [![Tests](https://github.com/vladdehtiarov/gpe-framework/actions/workflows/tests.yml/badge.svg)](https://github.com/vladdehtiarov/gpe-framework/actions/workflows/tests.yml)
 
-**GPE (Greedy-Prune-Explain)** is a novel method for generating minimal, interpretable local explanations for decision tree predictions. Unlike existing methods like LIME, SHAP, or Anchors, GPE leverages the inherent structure of decision trees to produce explanations that are:
+**GPE (Greedy-Prune-Explain)** explains one prediction of a decision tree with a short IF-THEN rule: the literals of the decision path that are needed to keep the model's answer on real data, measured on a background sample.
 
-- ✅ **Minimal** — Contains only essential conditions (1-2 instead of 5)
-- ✅ **Precise** — 99.4% precision on real-world financial data
-- ✅ **Fast** — 48x faster than LIME, 19x faster than Anchors
-- ✅ **Actionable** — Simple IF-THEN rules like "income < 50000 AND debt_ratio > 0.4"
+The rule says how the **model** behaves in a region. Its precision is agreement with the model, not the correctness of the prediction, and without `CertifiedGPE` it is an estimate with no guarantee on new data.
+
+The search is a standard greedy deletion, also used by LmPAXp (Izza et al.) and by Bounia and Setitra; what differs is the measure and the certificate. See [Method Properties](#-method-properties).
 
 ## 📊 Benchmark Results
 
-Tested on 3 financial datasets (632K records total):
+The current benchmark and its results will be published here once it is complete.
 
-| Method | Time (ms) | Complexity | Precision | Speedup |
-|--------|-----------|------------|-----------|---------|
-| **GPE-Core** | **4.4** | **1.4** | **99.4%** | **48x** |
-| GPE-IT | 3.0 | 1.4 | 97.9% | 71x |
-| LIME | 213 | 5.0 | — | 1x |
-| Anchors | 82 | 0.7 | 99.2% | 3x |
-
-*All results are statistically significant (p < 0.001)*
+Numbers in articles published before 2026-11 (4.4 ms, 1.4 conditions, 99.4%) came from an earlier protocol, with in-sample precision and two degenerate datasets. They should not be cited as the performance of this package.
 
 ## 🚀 Installation
 
@@ -87,7 +79,7 @@ print(explanation.to_natural_language())
 ```
 ```
 The model predicts 'setosa' because petal length is at most 2.45.
-This explanation covers 33.3% of similar cases with 100.0% accuracy.
+This rule covers 33.3% of the background rows, and the model gives the same answer on 100.0% of them.
 ```
 
 ## 🔧 GPE Variants
@@ -160,11 +152,15 @@ while conditions > 1:
 
 ### 3. EXPLAIN Phase
 Return the minimal rule with metrics:
-- **Precision** — Accuracy for instances satisfying the rule
+- **Precision** — Share of rows satisfying the rule on which the model gives the same class. NaN when no row satisfies it, never 1.0
 - **Coverage** — Proportion of dataset satisfying the rule
 - **Complexity** — Number of conditions
 
 ## 📊 Metrics
+
+Undefined values are NaN, on purpose: without a background sample, or on an empty region, there is nothing measured. `aggregate_metrics` skips them and reports how many rows it used as `n`. If you average by hand, use `np.nanmean`.
+
+Missing values follow the tree: a literal accepts NaN when the tree sends NaN that way, and the rule prints `(or missing)`.
 
 ```python
 from gpe import (
@@ -234,7 +230,7 @@ gpe-framework/
 │   ├── core.py              # GPEExplainer
 │   ├── certified.py         # CertifiedGPE, confidence bounds
 │   ├── compiled.py          # compile_explanations: leaf-to-rule table
-│   ├── novel_methods.py     # GPE-IT, GPE-CF (scientific contribution)
+│   ├── novel_methods.py     # GPE-IT, GPE-CF, GPE-Stable, GPE-Multi
 │   ├── variants.py          # GPEOptimal, GPEWeighted, GPEMonotonic, GPEEnsemble
 │   ├── explanation.py       # Data structures
 │   ├── metrics.py           # Evaluation metrics
